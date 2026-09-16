@@ -59,6 +59,9 @@
     <option value="timing-metronome">тайминг: 60 тапов по метроному 100 BPM</option>
     <option value="timing-free">тайминг: 40 свободных тапов</option>
     <option value="area">площадь: 60 тапов, 30 мягких + 30 резких</option>
+    <option value="area-alternating">площадь: 60 тапов, чередование по одному</option>
+    <option value="area-extremes">площадь: 40 тапов, крайности</option>
+    <option value="area-press">площадь: 20 тапов, прижим против кончика</option>
     <option value="control-touch">контроль: 20 тапов, только Touch</option>
     <option value="control-pointer">контроль: 20 тапов, только Pointer</option>
   </select>
@@ -99,6 +102,28 @@
     'area': {
       taps: 60, mode: 'both', bpm: 0, blocks: 10, recordMove: true,
       hint: 'Блоки по 10: мягко — подушечкой, без нажима; резко — кончиком, коротко и жёстко.'
+    },
+    // Чередование по одному тапу. Блоки по 10 оставляют место медленному дрейфу
+    // исполнения: за десять тапов подряд рука успевает уехать, и разница между
+    // градациями мешается с разницей между участками серии. При чередовании
+    // соседние тапы сняты в одинаковом состоянии руки.
+    'area-alternating': {
+      taps: 60, mode: 'both', bpm: 0, blocks: 1, recordMove: true,
+      hint: 'Чередуй КАЖДЫЙ тап: мягко — резко — мягко. Следи за рамкой, она подсказывает.'
+    },
+    // Крайности: нужен не фильтр, а полезный диапазон канала — достижимы ли
+    // верхние и нижние ступени вообще.
+    'area-extremes': {
+      taps: 40, mode: 'both', bpm: 0, blocks: 10, recordMove: true,
+      hint: 'Блоки по 10, без полутонов: мягко — едва коснуться, резко — изо всех сил.'
+    },
+    // Диагностика достижимости верхних ступеней. Сила и площадь пятна — разные
+    // вещи: короткий сильный удар кончиком даёт маленькое пятно, а прижим
+    // подушечкой — большое. Здесь инструкция задаёт ГЕОМЕТРИЮ контакта и время,
+    // а не силу, и проверяет, достижим ли верх диапазона в принципе.
+    'area-press': {
+      taps: 20, mode: 'both', bpm: 0, blocks: 10, recordMove: true,
+      hint: 'Блоки по 10: мягко — коротко кончиком пальца; резко — прижать подушечкой плашмя и подержать до счёта «раз».'
     },
     'control-touch': {
       taps: 20, mode: 'touch', bpm: 0, blocks: null, recordMove: false,
@@ -182,8 +207,12 @@
     if (grade) {
       zone.className = grade;
       zoneTitle.textContent = grade === 'soft' ? 'МЯГКО' : 'РЕЗКО';
-      var inBlock = proto.blocks - (taps % proto.blocks);
-      zoneSub.textContent = 'в блоке осталось ' + inBlock + ', всего ' + left;
+      if (proto.blocks === 1) {
+        zoneSub.textContent = 'чередование, осталось ' + left;
+      } else {
+        var inBlock = proto.blocks - (taps % proto.blocks);
+        zoneSub.textContent = 'в блоке осталось ' + inBlock + ', всего ' + left;
+      }
       rec.setLabel(grade);
     } else {
       zone.className = 'plain';

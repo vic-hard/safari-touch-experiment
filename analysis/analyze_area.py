@@ -209,18 +209,6 @@ def a1_channels(sessions):
     return touch_live, pointer_live
 
 
-def pick_source(sessions, requested, touch_live, pointer_live):
-    if requested != "auto":
-        return requested
-    if touch_live:
-        return "touch"
-    if pointer_live:
-        return "pointer"
-    return None
-
-
-# --- A10 -------------------------------------------------------------------
-
 def collect_features(sessions, source):
     """(имя сессии, метка, признак) по всем контактам."""
     rows = []
@@ -235,7 +223,6 @@ def collect_features(sessions, source):
 
 
 def a10_filter(train_rows, test_rows, source):
-    head("A10 — фильтр мягкости: обучение и отложенная проверка")
     print("  поток: %s, признак: максимум площади за контакт" % source)
 
     train_soft = [r["feature"] for r in train_rows if r["label"] == "soft"]
@@ -249,9 +236,9 @@ def a10_filter(train_rows, test_rows, source):
     print("    резкие: %s" % fmt_desc(describe(train_sharp)))
 
     # Направление признака. План (§7.5) берёт порог как максимум признака по
-    # мягким: подразумевается, что резкий тап даёт большую площадь — палец
-    # сильнее деформируется. Если в данных наоборот, правило пропустит всё
-    # подряд и даст молча бессмысленный ответ, поэтому направление проверяется.
+    # мягким: подразумевается, что резкий тап даёт большую площадь. Если в
+    # данных наоборот, правило пропустит всё подряд и даст молча бессмысленный
+    # ответ, поэтому направление проверяется.
     inverted = False
     if train_sharp:
         inverted = statistics.median(train_sharp) <= statistics.median(train_soft)
@@ -261,8 +248,7 @@ def a10_filter(train_rows, test_rows, source):
             print("      дают МЕНЬШУЮ площадь, чем мягкие (медианы %.3f против %.3f)."
                   % (statistics.median(train_sharp), statistics.median(train_soft)))
             print("      Правило «порог = максимум по мягким» рассчитано на обратный знак.")
-            print("      Ниже считаются оба варианта; в findings.md идёт тот, чьё")
-            print("      направление подтверждено данными.")
+            print("      Ниже считаются оба варианта.")
 
     # Порог — максимум признака по мягким тапам обучающих серий (SF §7.5):
     # фильтр обязан пропускать все мягкие, цена — часть резких проходит тоже.
@@ -311,12 +297,73 @@ def a10_filter(train_rows, test_rows, source):
 
 def write_csv(path, rows, source):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="") as fh:
+    new = not os.path.exists(path)
+    with open(path, "a", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["session", "source", "tapIndex", "label", "featureMaxArea", "closed"])
+        if new:
+            w.writerow(["session", "source", "tapIndex", "label", "featureMaxArea", "closed"])
         for r in rows:
             w.writerow([r["session"], source, r["tapIndex"], r["label"],
                         "%.4f" % r["feature"], r["closed"]])
+
+def within_contact_dynamics(sessions):
+    """Меняется ли размер пятна в течение контакта — по каждому потоку.
+
+    От этого зависит судьба признака SF §5 («максимум площади за контакт»):
+    если значение заморожено на момент касания, максимум брать не из чего и
+    признак вырождается в «значение при касании». Потоки на iPhone ведут себя
+    по-разному, поэтому проверяются оба.
+    """
+    head("динамика пятна внутри контакта")
+    for source in ("touch", "pointer"):
+        total = moving = grew = 0
+        for _, session in sessions:
+            for c in contacts(session, source):
+                vals = [AREA_FN[source](e) for e in c["events"]]
+                vals = [v for v in vals if isinstance(v, (int, float)) and v > 0]
+                if len(vals) < 2:
+                    continue
+                total += 1
+                if len(set(vals)) > 1:
+                    moving += 1
+                if max(vals) > vals[0]:
+                    grew += 1
+        if not total:
+            print("  %-8s контактов с двумя и более отсчётами нет" % source)
+            continue
+        print("  %-8s контактов с >=2 отсчётами: %3d, значение менялось: %3d,"
+              " максимум выше начального: %3d" % (source, total, moving, grew))
+        if moving == 0:
+            print("           значение заморожено на момент касания: признак «максимум за")
+            print("           контакт» здесь вырождается в «значение при касании»")
+
+
+def run_for_source(loaded, source, args, holdout):
+    """Полный расчёт A10 по одному потоку."""
+    rows = collect_features(loaded, source)
+    if args.csv:
+        write_csv(args.csv, rows, source)
+        print("  CSV: %s" % args.csv)
+
+    labels = Counter(r["label"] for r in rows)
+    print("  контактов с признаком: %d, метки: %s" % (len(rows), dict(labels)))
+
+    if len(loaded) < 2:
+        print("  A10 требует минимум двух серий: обучение на двух, проверка на"
+              " отложенной третьей (SF §2). Сейчас серия одна — считается только A1.")
+        return
+    if len(loaded) < 3:
+        print("  [!] серий меньше трёх: обучение и проверка разведены, но запаса нет."
+              " По SF §3.1 отложенная серия обязательна — досними третью.")
+
+    train_rows = [r for r in rows if r["session"] != holdout]
+    test_rows = [r for r in rows if r["session"] == holdout]
+    print("  отложенная серия: %s (контактов %d), обучающих контактов %d"
+          % (holdout, len(test_rows), len(train_rows)))
+    if not test_rows:
+        print("  [!] отложенная серия не найдена среди загруженных — проверь --holdout")
+        return
+    a10_filter(train_rows, test_rows, source)
 
 
 def main(argv=None):
@@ -324,7 +371,7 @@ def main(argv=None):
     ap.add_argument("sessions", nargs="+", help="JSON сессии из data/")
     ap.add_argument("--holdout", help="отложенная серия (по умолчанию — последняя из списка)")
     ap.add_argument("--source", choices=["auto", "touch", "pointer"], default="auto",
-                    help="поток, из которого берётся геометрия")
+                    help="поток геометрии; auto считает оба, потому что они отличаются")
     ap.add_argument("--csv", help="выгрузить признаки по контактам в CSV")
     ap.add_argument("--include-partial", action="store_true",
                     help="не исключать прерванные серии (по умолчанию исключаются)")
@@ -336,9 +383,8 @@ def main(argv=None):
         session = load(path)
         meta = session.get("meta") or {}
         planned, actual = meta.get("plannedTaps"), meta.get("actualTaps")
-        # Прерванная серия — это не маленькая серия, а серия с оборванным
-        # блоком градаций: последний блок недобран, и доли по градациям
-        # перекошены. В обучение и в проверку такая идти не должна.
+        # Прерванная серия — это серия с оборванным блоком градаций: доли по
+        # градациям перекошены, в обучение и проверку она идти не должна.
         if isinstance(planned, int) and isinstance(actual, int) and actual < planned:
             partial.append((name, actual, planned))
             if not args.include_partial:
@@ -353,6 +399,21 @@ def main(argv=None):
     if not loaded:
         print("не осталось ни одной пригодной серии")
         return 2
+
+    # Серии разных протоколов нельзя молча смешивать: условия исполнения разные,
+    # и порог, снятый по их смеси, не описывает ни одну из съёмок.
+    protocols = {}
+    for name, session in loaded:
+        protocols.setdefault((session.get("meta") or {}).get("protocol"), []).append(name)
+    if len(protocols) > 1:
+        print()
+        print("  [!] В ОДНОМ РАСЧЁТЕ СМЕШАНЫ РАЗНЫЕ ПРОТОКОЛЫ:")
+        for proto, names in protocols.items():
+            print("      %-28s %d серия(й)" % (proto, len(names)))
+        print("      Обучение и проверка должны идти по сериям одного протокола.")
+        print("      Считаю как просили, но число A10 при такой смеси не сопоставимо")
+        print("      ни с эталоном, ни с другими прогонами.")
+
     print("сессий загружено: %d" % len(loaded))
     for name, session in loaded:
         meta = session.get("meta") or {}
@@ -363,37 +424,21 @@ def main(argv=None):
             print("      [!] СРЕДА НЕ SAFARI (%s) — серия не является измерением" % kind)
 
     touch_live, pointer_live = a1_channels(loaded)
-    source = pick_source(loaded, args.source, touch_live, pointer_live)
-    if source is None:
-        print("\n  A10 не считается: живого канала геометрии нет.")
-        return 0
-
-    rows = collect_features(loaded, source)
-    if args.csv:
-        write_csv(args.csv, rows, source)
-        print("\n  CSV: %s" % args.csv)
-
-    labels = Counter(r["label"] for r in rows)
-    print("\n  контактов с признаком: %d, метки: %s" % (len(rows), dict(labels)))
+    within_contact_dynamics(loaded)
 
     holdout = os.path.basename(args.holdout) if args.holdout else loaded[-1][0]
-    if len(loaded) < 2:
-        print("\n  A10 требует минимум двух серий: обучение на двух, проверка на"
-              " отложенной третьей (SF §2). Сейчас серия одна — считается только A1.")
-        return 0
-    if len(loaded) < 3:
-        print("\n  [!] серий меньше трёх: обучение и проверка разведены, но запаса нет."
-              " По SF §3.1 отложенная серия обязательна — досними третью.")
+    if args.source == "auto":
+        sources = [src for src, live in (("touch", touch_live), ("pointer", pointer_live)) if live]
+        if not sources:
+            print()
+            print("  A10 не считается: живого канала геометрии нет.")
+            return 0
+    else:
+        sources = [args.source]
 
-    train_rows = [r for r in rows if r["session"] != holdout]
-    test_rows = [r for r in rows if r["session"] == holdout]
-    print("  отложенная серия: %s (контактов %d), обучающих контактов %d"
-          % (holdout, len(test_rows), len(train_rows)))
-    if not test_rows:
-        print("  [!] отложенная серия не найдена среди загруженных — проверь --holdout")
-        return 2
-
-    a10_filter(train_rows, test_rows, source)
+    for src in sources:
+        head("A10 по потоку %s" % src)
+        run_for_source(loaded, src, args, holdout)
     return 0
 
 

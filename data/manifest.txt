@@ -8,83 +8,109 @@
 20260916-130307-probe-p1-s1-both.json
     sha256      65b9aeec55b2f7ae88366f12499f42759a96078f6de83ae2ac7af319e283f7c0
     байт        157843
-    формат      web-probe-0.1.0
     протокол    probe-20: 10 soft + 10 sharp
     участник    p1, серия 1, режим потоков both
     тапов       None из None
     событий     135, кадров 1045, простоев кадров 0
     среда       safari
-    устройство  Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.7.5 Mobile/15E148 Safari/604.1
     снято       2026-09-16T08:02:46.387Z
 
 20260916-131407-collect-p1-s1-both.json
     sha256      c5b67dd050724c695688e74516d041ce86764efd1c9ed62e86980d5b63d4356a
     байт        302695
-    формат      web-probe-0.1.0
     протокол    timing-metronome
     участник    p1, серия 1, режим потоков both
     тапов       60 из 60
     событий     246, кадров 2445, простоев кадров 0
     среда       safari
-    устройство  Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.7.5 Mobile/15E148 Safari/604.1
     снято       2026-09-16T08:13:22.087Z
 
 20260916-132000-collect-p1-s1-both.json
     sha256      3fce82cf75b46a1a85096ff75370e24619f80c00af1ee2dd5934ab975b0c0e45
     байт        367737
-    формат      web-probe-0.1.0
     протокол    area
     участник    p1, серия 1, режим потоков both
     тапов       60 из 60
     событий     298, кадров 3358, простоев кадров 0
     среда       safari
-    устройство  Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.7.5 Mobile/15E148 Safari/604.1
     снято       2026-09-16T08:18:59.704Z
 
 20260916-132255-collect-p1-s2-both.json
     sha256      8d9001cf352a010f842e16b6816d2640fff5e65bc746b995404d2ce55099619e
     байт        461894
-    формат      web-probe-0.1.0
     протокол    area
     участник    p1, серия 2, режим потоков both
     тапов       60 из 60
     событий     386, кадров 3425, простоев кадров 0
     среда       safari
-    устройство  Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.7.5 Mobile/15E148 Safari/604.1
     снято       2026-09-16T08:21:54.062Z
 
 20260916-132552-collect-p1-s3-both.json
     sha256      c71efa376fc893eb920ca970c18958a2c72543863e83e5519d950c9f91765f2f
     байт        526673
-    формат      web-probe-0.1.0
     протокол    area
     участник    p1, серия 3, режим потоков both
     тапов       60 из 60
     событий     428, кадров 5183, простоев кадров 0
     среда       safari
-    устройство  Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.7.5 Mobile/15E148 Safari/604.1
     снято       2026-09-16T08:24:22.238Z
 
 20260916-132902-collect-p1-s4-touch.json
     sha256      b378955ea409cfc7ff0874920f3c92aef13d1189b1556e374852c5ad8d508e4f
     байт        55528
-    формат      web-probe-0.1.0
     протокол    control-touch
     участник    p1, серия 4, режим потоков touch
     тапов       20 из 20
     событий     40, кадров 930, простоев кадров 0
     среда       safari
-    устройство  Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.7.5 Mobile/15E148 Safari/604.1
     снято       2026-09-16T08:28:42.773Z
 
 20260916-133010-collect-p1-s5-pointer.json
     sha256      6151adaa9756af272a5e6d80e60cb6572ac1e8cea6527dd947fae9b5961ecc6e
     байт        53190
-    формат      web-probe-0.1.0
     протокол    control-pointer
     участник    p1, серия 5, режим потоков pointer
     тапов       20 из 20
     событий     40, кадров 804, простоев кадров 0
     среда       safari
-    устройство  Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.7.5 Mobile/15E148 Safari/604.1
     снято       2026-09-16T08:29:53.398Z
+
+20260916-163058-collect-p1-s6-both.json
+    sha256      e2de698a72db93dc2c12e2889040fc22df79ac52ae2515fc8db97f1c2ce6881f
+    байт        416587
+    протокол    area-alternating
+    участник    p1, серия 6, режим потоков both
+    тапов       60 из 60
+    событий     338, кадров 4177, простоев кадров 0
+    среда       safari
+    снято       2026-09-16T11:29:44.529Z
+
+20260916-163234-collect-p1-s7-both.json
+    sha256      33f122ebe94bb627e5196ae3045808a4981c8a503c86045a450c0d3f281a1814
+    байт        324198
+    протокол    area-extremes
+    участник    p1, серия 7, режим потоков both
+    тапов       40 из 40
+    событий     270, кадров 2465, простоев кадров 0
+    среда       safari
+    снято       2026-09-16T11:31:49.213Z
+
+20260916-164753-collect-p1-s8-both.json
+    sha256      13297cbd21b9b5a32571a5aa47c0aa688d95ba8285cf43a858ab301219e730ae
+    байт        335093
+    протокол    area-extremes
+    участник    p1, серия 8, режим потоков both
+    тапов       40 из 40
+    событий     280, кадров 2152, простоев кадров 0
+    среда       safari
+    снято       2026-09-16T11:47:12.599Z
+
+20260916-165253-collect-p1-s9-both.json
+    sha256      eb30b08ae9d4163ece0bdcfb9e6fc19482fd2150be1c509180eae69358d2d994
+    байт        388481
+    протокол    area-press
+    участник    p1, серия 9, режим потоков both
+    тапов       20 из 20
+    событий     318, кадров 2995, простоев кадров 0
+    среда       safari
+    снято       2026-09-16T11:51:58.670Z
