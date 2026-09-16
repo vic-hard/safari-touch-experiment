@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Э1 — пробник каналов</title>
+<style>
+  :root { color-scheme: dark; }
+  * { -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; background: #14161a; color: #e8ecf1;
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    padding: calc(env(safe-area-inset-top, 0px) + 10px) 12px calc(env(safe-area-inset-bottom, 0px) + 16px);
+    -webkit-text-size-adjust: 100%; -webkit-user-select: none; user-select: none;
+  }
+  h1 { font-size: 17px; margin: 0 0 8px; }
+  h1 a { color: #6fa8ff; text-decoration: none; font-weight: normal; font-size: 14px; margin-left: 8px; }
+  .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  button {
+    flex: 1 1 auto; min-width: 90px; font-size: 15px; padding: 11px 12px;
+    background: #273041; color: #e8ecf1; border: 1px solid #39465c; border-radius: 10px;
+  }
+  button.primary { background: #2b5fd9; border-color: #2b5fd9; }
+  button:disabled { opacity: .45; }
+  #zone {
+    /* Зона тапа далеко от краёв и от полосы home indicator (PLAN §10):
+       Safari перехватывает жесты у границ экрана. */
+    margin: 10px 28px 14px; height: 150px; border-radius: 16px;
+    background: #1b2330; border: 2px dashed #39465c;
+    display: flex; align-items: center; justify-content: center; text-align: center;
+    touch-action: none; /* без этого — прокрутка, pull-to-refresh и двойной тап */
+    font-size: 17px; color: #9aa4b2;
+  }
+  #zone.soft { border-color: #3aa06a; }
+  #zone.sharp { border-color: #d9703a; }
+  #zone.done { border-color: #2b5fd9; }
+  .status { font-size: 15px; margin-bottom: 6px; }
+  .status b { font-size: 17px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 2px 4px; vertical-align: top; }
+  th { color: #9aa4b2; font-weight: normal; width: 42%; }
+  td.v { font-family: ui-monospace, Menlo, monospace; }
+  td.null { color: #7b8492; }
+  td.live { color: #63d68f; }
+  .cols { display: flex; gap: 10px; }
+  .cols > div { flex: 1 1 50%; min-width: 0; background: #1a1e25; border: 1px solid #2d333d; border-radius: 10px; padding: 8px; }
+  .cols h2 { font-size: 13px; margin: 0 0 6px; color: #9aa4b2; font-weight: normal; }
+  pre#log {
+    background: #0f1115; border: 1px solid #2d333d; border-radius: 10px; margin: 10px 0 0;
+    padding: 8px; height: 150px; overflow: auto; font-size: 11px; line-height: 1.35;
+    font-family: ui-monospace, Menlo, monospace; white-space: pre; -webkit-overflow-scrolling: touch;
+  }
+  .hint { color: #9aa4b2; font-size: 12px; margin: 6px 0 0; }
+</style>
+</head>
+<body>
+<h1>Э1 — пробник каналов<a href="index.html">← режимы</a></h1>
+
+<div class="status" id="status">калибровка часов…</div>
+
+<div class="row">
+  <button id="start" class="primary">Старт 20 тапов</button>
+  <button id="stop" disabled>Стоп</button>
+  <button id="export" disabled>Выгрузить</button>
+</div>
+
+<div id="zone">жми «Старт»</div>
+
+<div class="cols">
+  <div><h2>touchstart (последний)</h2><table id="tTouch"></table></div>
+  <div><h2>pointerdown (последний)</h2><table id="tPointer"></table></div>
+</div>
+
+<p class="hint">Разброс значений за серию считается на экране только для ориентировки.
+Вывод по A1/A10 делает <code>analysis/analyze_area.py</code> по выгруженному JSON (критерий A9).</p>
+
+<table id="tSpread" style="margin-top:6px"></table>
+
+<pre id="log"></pre>
+
+<script src="js/log.js"></script>
+<script src="js/clock.js"></script>
+<script src="js/recorder.js"></script>
+<script src="js/export.js"></script>
+<script>
+(function () {
+  'use strict';
+  Log.attach('log');
+
+  var SOFT_TAPS = 10, SHARP_TAPS = 10, TOTAL = SOFT_TAPS + SHARP_TAPS;
+
+  var zone = document.getElementById('zone');
+  var statusEl = document.getElementById('status');
+  var btnStart = document.getElementById('start');
+  var btnStop = document.getElementById('stop');
+  var btnExport = document.getElementById('export');
+
+  // Калибровка часов — первой (PLAN §7.1).
+  var calib = Clock.calibrate(200);
+  var environment = Clock.env();
+  Log.ok('гранулярность performance.now() = ' + calib.granularityMs + ' мс (по ' +
+         calib.distinctSteps + ' шагам за ' + calib.durationMs + ' мс)');
+  Log.kv({ userAgent: environment.userAgent, maxTouchPoints: environment.maxTouchPoints,
+           devicePixelRatio: environment.devicePixelRatio,
+           PointerEvent: environment.hasPointerEvents, TouchEvent: environment.hasTouchEvents,
+           getCoalescedEvents: environment.hasCoalesced });
+
+  var frames = new Clock.Frames().start();
+
+  /* Среда съёмки. Встроенный WebView мессенджера — не Safari: другой процесс,
+     другие ограничения, и серия из него отвечает на другой вопрос (PLAN §1).
+     Поэтому в WebView и в сторонних браузерах iOS съёмка не даётся. */
+  (function () {
+    var kind = environment.browserKind;
+    if (kind === 'safari') return;
+    if (kind === 'in-app-webview' || kind === 'other-ios-browser') {
+      Log.banner(kind === 'in-app-webview'
+        ? 'Это встроенный браузер приложения, а не Safari. Серия отсюда недействительна. '
+          + 'Открой ссылку в Safari: меню «Поделиться» или «…» → «Открыть в Safari».'
+        : 'Это сторонний браузер iOS, а не Safari. Открой ссылку в Safari.');
+      Log.err('среда: ' + kind + ' — съёмка заблокирована');
+      btnStart.disabled = true;
+      btnStart.textContent = 'нужен Safari';
+    } else {
+      Log.banner('Похоже, это не Safari на iPhone. Страница работает, но снятое здесь'
+                 + ' измерением не считается — проверяй стенд, а не устройство.');
+      Log.warn('среда: ' + kind);
+    }
+  })();
+  var rec = null;
+  var tapCount = 0;
+  var spread = {};   // поле -> {min, max, n} по DOWN-событиям серии
+
+  var TOUCH_FIELDS = ['identifier', 'radiusX', 'radiusY', 'rotationAngle', 'force',
+                      'clientX', 'clientY', 'touchesCount', 'timeStamp', 'nowMs',
+                      'handlerLagMs', 'offsetFromFrameMs'];
+  var POINTER_FIELDS = ['pointerId', 'pointerType', 'width', 'height', 'pressure',
+                        'tangentialPressure', 'tiltX', 'tiltY', 'twist', 'isPrimary',
+                        'clientX', 'clientY', 'coalescedCount', 'predictedCount',
+                        'timeStamp', 'nowMs', 'handlerLagMs', 'offsetFromFrameMs'];
+  // Каналы, по которым решается В1: живая геометрия или константа.
+  var GEOMETRY = ['radiusX', 'radiusY', 'rotationAngle', 'force', 'width', 'height', 'pressure'];
+
+  function renderFields(tableId, fields, rec_) {
+    var t = document.getElementById(tableId);
+    t.innerHTML = fields.map(function (f) {
+      var v = rec_ ? rec_[f] : undefined;
+      var cls = (v === null || v === undefined) ? 'v null' : 'v';
+      var text = (v === null) ? 'null' : (v === undefined ? '—' : String(v));
+      return '<tr><th>' + f + '</th><td class="' + cls + '">' + text + '</td></tr>';
+    }).join('');
+  }
+
+  function noteSpread(r) {
+    GEOMETRY.forEach(function (f) {
+      var v = r[f];
+      if (typeof v !== 'number') return;
+      var s = spread[f] || (spread[f] = { min: v, max: v, n: 0 });
+      if (v < s.min) s.min = v;
+      if (v > s.max) s.max = v;
+      s.n++;
+    });
+    var rows = Object.keys(spread).map(function (f) {
+      var s = spread[f];
+      var live = (s.max - s.min) > 1e-9;
+      return '<tr><th>' + f + ' (n=' + s.n + ')</th><td class="v ' + (live ? 'live' : 'null') + '">' +
+             s.min + ' … ' + s.max + (live ? '  живой' : '  константа') + '</td></tr>';
+    });
+    document.getElementById('tSpread').innerHTML = rows.join('');
+  }
+
+  function phaseFor(n) { return n < SOFT_TAPS ? 'soft' : 'sharp'; }
+
+  function setPhase() {
+    var phase = phaseFor(tapCount);
+    rec.setLabel(phase);
+    zone.className = phase;
+    var left = (phase === 'soft' ? SOFT_TAPS : TOTAL) - tapCount;
+    zone.textContent = (phase === 'soft' ? 'МЯГКО' : 'РЕЗКО') + ' — осталось ' + left;
+    statusEl.innerHTML = '<b>' + tapCount + ' / ' + TOTAL + '</b> тапов, фаза: ' +
+      (phase === 'soft' ? 'мягкие' : 'резкие');
+  }
+
+  // Тапы считаются по Pointer Events; если их нет — по Touch, иначе серия
+  // просто не поедет.
+  // Тапы считает рекордер: он видит оба потока и не зависит от того, какой из
+  // них движок присылает первым (в Safari это pointerdown, не touchstart).
+  // Серия закрывается на полном закрытии последнего контакта — иначе UP
+  // второго потока не попадёт в журнал и анализ засчитает потерю (A6).
+  var awaitingLastUp = false, lastUpTimer = null;
+
+  function armFinish() {
+    awaitingLastUp = true;
+    zone.className = 'done';
+    zone.textContent = 'отпусти палец';
+    lastUpTimer = setTimeout(function () {
+      Log.warn('UP последнего тапа не пришёл за 2 с — закрываю серию как есть');
+      finish();
+    }, 2000);
+  }
+
+  function onEvent(r) {
+    if (r.source === 'touch' && r.type === 'touchstart') {
+      renderFields('tTouch', TOUCH_FIELDS, r);
+      noteSpread(r);
+    }
+    if (r.source === 'pointer' && r.type === 'pointerdown') {
+      renderFields('tPointer', POINTER_FIELDS, r);
+      noteSpread(r);
+    }
+    if (r.type === 'pointercancel' || r.type === 'touchcancel') {
+      Log.warn('отмена контакта: ' + r.type + ' на тапе ' + r.tapIndex);
+    }
+  }
+
+  function onTapStart() {
+    if (awaitingLastUp) return;
+    tapCount++;
+    if (tapCount >= TOTAL) armFinish();
+    else setPhase();   // метка идущего тапа уже защёлкнута, это для следующего
+  }
+
+  function onTapEnd() {
+    if (awaitingLastUp) finish();
+  }
+
+  function finish() {
+    if (lastUpTimer !== null) { clearTimeout(lastUpTimer); lastUpTimer = null; }
+    awaitingLastUp = false;
+    rec.stop();
+    frames.unwatch();
+    zone.className = 'done';
+    zone.textContent = 'серия снята — выгружай';
+    statusEl.innerHTML = '<b>' + tapCount + ' / ' + TOTAL + '</b> тапов — готово';
+    btnStop.disabled = true;
+    btnStart.disabled = false;
+    btnExport.disabled = false;
+    var c = rec.counts();
+    Log.ok('события: ' + JSON.stringify(c));
+  }
+
+  btnStart.addEventListener('click', function () {
+    tapCount = 0;
+    awaitingLastUp = false;
+    spread = {};
+    document.getElementById('tSpread').innerHTML = '';
+    rec = new Recorder({
+      element: zone, mode: 'both', frames: frames,
+      recordMove: true,        // move — обязательный контроль метода для A4
+      preventDefault: false,   // не искажаем второй поток (PLAN §7.3)
+      onEvent: onEvent, onTapStart: onTapStart, onTapEnd: onTapEnd
+    });
+    frames.reset();
+    rec.start();
+    frames.watch(function (ms, n) {
+      Log.warn('кадры не идут ' + ms + ' мс (простой №' + n + '): привязка к кадру'
+               + ' на этом участке недостоверна — не уводи страницу из фокуса');
+    });
+    setPhase();
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+    btnExport.disabled = true;
+    Log.ok('старт серии: 10 мягких, затем 10 резких');
+  });
+
+  btnStop.addEventListener('click', function () { finish(); });
+
+  btnExport.addEventListener('click', function () {
+    btnExport.disabled = true;
+    var meta = {};
+    try { meta = JSON.parse(localStorage.getItem('ste-meta') || '{}'); } catch (e) {}
+    meta.page = 'probe';
+    meta.stage = 'E1';
+    meta.protocol = 'probe-20: 10 soft + 10 sharp';
+    meta.env = environment;
+    var session = rec.session(meta, {
+      calibration: calib,
+      granularityMs: calib.granularityMs,
+      timeOrigin: calib.timeOrigin
+    });
+    Log.line('выгрузка: ' + session.events.length + ' событий, ' + session.frames.length + ' кадров');
+    Export.save(session).then(function () { btnExport.disabled = false; });
+  });
+
+  statusEl.textContent = 'готов: гранулярность часов ' + calib.granularityMs + ' мс';
+})();
+</script>
+</body>
+</html>

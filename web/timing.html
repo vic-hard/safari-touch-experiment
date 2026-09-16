@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Э2 — тайминговый стенд</title>
+<style>
+  :root { color-scheme: dark; }
+  * { -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; background: #14161a; color: #e8ecf1;
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    padding: calc(env(safe-area-inset-top, 0px) + 10px) 12px calc(env(safe-area-inset-bottom, 0px) + 16px);
+    -webkit-text-size-adjust: 100%; -webkit-user-select: none; user-select: none;
+  }
+  h1 { font-size: 17px; margin: 0 0 8px; }
+  h1 a { color: #6fa8ff; text-decoration: none; font-weight: normal; font-size: 14px; margin-left: 8px; }
+  .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
+  button {
+    flex: 1 1 auto; min-width: 86px; font-size: 15px; padding: 11px 12px;
+    background: #273041; color: #e8ecf1; border: 1px solid #39465c; border-radius: 10px;
+  }
+  button.primary { background: #2b5fd9; border-color: #2b5fd9; }
+  button:disabled { opacity: .45; }
+  select {
+    font-size: 15px; padding: 10px; background: #14161a; color: #e8ecf1;
+    border: 1px solid #39465c; border-radius: 10px;
+  }
+  #zone {
+    margin: 10px 28px 12px; height: 130px; border-radius: 16px;
+    background: #1b2330; border: 2px dashed #39465c; touch-action: none;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; color: #9aa4b2; text-align: center;
+  }
+  #zone.armed { border-color: #3aa06a; color: #e8ecf1; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 2px 4px; }
+  th { color: #9aa4b2; font-weight: normal; width: 52%; }
+  td { font-family: ui-monospace, Menlo, monospace; }
+  .card { background: #1a1e25; border: 1px solid #2d333d; border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; }
+  .card h2 { font-size: 13px; margin: 0 0 6px; color: #9aa4b2; font-weight: normal; }
+  pre { margin: 0; font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.3; white-space: pre; overflow-x: auto; }
+  pre#log {
+    background: #0f1115; border: 1px solid #2d333d; border-radius: 10px;
+    padding: 8px; height: 130px; overflow: auto; -webkit-overflow-scrolling: touch;
+  }
+  .hint { color: #9aa4b2; font-size: 12px; margin: 6px 0; }
+</style>
+</head>
+<body>
+<h1>Э2 — тайминговый стенд<a href="index.html">← режимы</a></h1>
+
+<div class="row">
+  <button id="start" class="primary">Старт записи</button>
+  <button id="stop" disabled>Стоп</button>
+  <button id="export" disabled>Выгрузить</button>
+</div>
+<div class="row">
+  <select id="bpm">
+    <option value="0">без метронома</option>
+    <option value="100" selected>метроном 100 BPM (доля 600 мс)</option>
+    <option value="120">метроном 120 BPM (доля 500 мс)</option>
+  </select>
+</div>
+
+<div id="zone">жми «Старт»</div>
+
+<div class="card"><h2>часы и кадры</h2><table id="tClock"></table></div>
+
+<div class="card">
+  <h2>смещение от границы кадра, мс (A4)</h2>
+  <table id="tOffsets"></table>
+  <pre id="histDown"></pre>
+  <pre id="histMove"></pre>
+  <p class="hint">Контроль метода: move заведомо склеен с кадрами и обязан дать узкую
+  полосу. Полоса у обоих или ни у одного — чиним метод, а не делаем выводы.</p>
+</div>
+
+<div class="card"><h2>контакты и метроном</h2><table id="tTaps"></table></div>
+
+<pre id="log"></pre>
+
+<script src="js/log.js"></script>
+<script src="js/clock.js"></script>
+<script src="js/recorder.js"></script>
+<script src="js/export.js"></script>
+<script>
+(function () {
+  'use strict';
+  Log.attach('log');
+
+  var zone = document.getElementById('zone');
+  var btnStart = document.getElementById('start');
+  var btnStop = document.getElementById('stop');
+  var btnExport = document.getElementById('export');
+  var bpmSel = document.getElementById('bpm');
+
+  // A2/A3: калибровка часов первой, до любых утверждений о квантовании.
+  var calib = Clock.calibrate(200);
+  var environment = Clock.env();
+  var frames = new Clock.Frames().start();
+
+  /* Среда съёмки. Встроенный WebView мессенджера — не Safari: другой процесс,
+     другие ограничения, и серия из него отвечает на другой вопрос (PLAN §1).
+     Поэтому в WebView и в сторонних браузерах iOS съёмка не даётся. */
+  (function () {
+    var kind = environment.browserKind;
+    if (kind === 'safari') return;
+    if (kind === 'in-app-webview' || kind === 'other-ios-browser') {
+      Log.banner(kind === 'in-app-webview'
+        ? 'Это встроенный браузер приложения, а не Safari. Серия отсюда недействительна. '
+          + 'Открой ссылку в Safari: меню «Поделиться» или «…» → «Открыть в Safari».'
+        : 'Это сторонний браузер iOS, а не Safari. Открой ссылку в Safari.');
+      Log.err('среда: ' + kind + ' — съёмка заблокирована');
+      btnStart.disabled = true;
+      btnStart.textContent = 'нужен Safari';
+    } else {
+      Log.banner('Похоже, это не Safari на iPhone. Страница работает, но снятое здесь'
+                 + ' измерением не считается — проверяй стенд, а не устройство.');
+      Log.warn('среда: ' + kind);
+    }
+  })();
+  var rec = null, metro = null;
+
+  /* --- бегущие статистики (Уэлфорд): среднее и СКО без хранения выборки --- */
+  function Stat() { this.n = 0; this.mean = 0; this.m2 = 0; this.min = null; this.max = null; }
+  Stat.prototype.add = function (x) {
+    this.n++;
+    var d = x - this.mean;
+    this.mean += d / this.n;
+    this.m2 += d * (x - this.mean);
+    if (this.min === null || x < this.min) this.min = x;
+    if (this.max === null || x > this.max) this.max = x;
+  };
+  Stat.prototype.sd = function () { return this.n > 1 ? Math.sqrt(this.m2 / (this.n - 1)) : null; };
+  Stat.prototype.fmt = function (unit) {
+    if (!this.n) return '—';
+    var sd = this.sd();
+    return this.mean.toFixed(2) + ' ± ' + (sd === null ? '—' : sd.toFixed(2)) +
+           ' [' + this.min.toFixed(2) + '…' + this.max.toFixed(2) + '] n=' + this.n + (unit || '');
+  };
+
+  var stOffDown = new Stat(), stOffMove = new Stat(), stDur = new Stat(), stBeat = new Stat();
+  var histDown = new Array(17).fill(0), histMove = new Array(17).fill(0);
+  var downAt = Object.create(null);   // pointerId -> now, для интервала DOWN→UP
+  var counters = { down: 0, up: 0, cancel: 0, unpaired: 0 };
+
+  function bin(offset, hist) {
+    var i = Math.floor(offset);
+    if (i < 0) i = 0;
+    if (i > 16) i = 16;
+    hist[i]++;
+  }
+
+  function drawHist(hist, title, el) {
+    var max = Math.max.apply(null, hist) || 1;
+    var lines = [title];
+    for (var i = 0; i < hist.length; i++) {
+      var bar = new Array(Math.round(hist[i] / max * 24) + 1).join('#');
+      lines.push(String(i).padStart(2, ' ') + ' | ' + bar.padEnd(24, ' ') + ' ' + hist[i]);
+    }
+    el.textContent = lines.join('\n');
+  }
+
+  function renderClock() {
+    var rows = [
+      ['гранулярность performance.now()', calib.granularityMs + ' мс'],
+      ['timeOrigin', calib.timeOrigin],
+      ['период кадра (медиана)', frames.periodMs() + ' мс'],
+      ['кадров записано', frames.times.length],
+      ['getOutputTimestamp', metro && metro.mapping ? metro.mapping.method : '—'],
+      ['baseLatency', metro && metro.mapping ? metro.mapping.baseLatencyMs + ' мс' : '—']
+    ];
+    document.getElementById('tClock').innerHTML = rows.map(function (r) {
+      return '<tr><th>' + r[0] + '</th><td>' + r[1] + '</td></tr>';
+    }).join('');
+  }
+
+  function renderStats() {
+    document.getElementById('tOffsets').innerHTML = [
+      ['pointerdown', stOffDown.fmt()],
+      ['pointermove (контроль)', stOffMove.fmt()]
+    ].map(function (r) { return '<tr><th>' + r[0] + '</th><td>' + r[1] + '</td></tr>'; }).join('');
+
+    var q = 16.7 / Math.sqrt(12);
+    var sd = stBeat.sd();
+    document.getElementById('tTaps').innerHTML = [
+      ['DOWN / UP / cancel', counters.down + ' / ' + counters.up + ' / ' + counters.cancel],
+      ['DOWN→UP, мс (A5)', stDur.fmt()],
+      ['отклонение от доли, мс (A8)', stBeat.fmt()],
+      ['СКО отклонения / вклад кадра (' + q.toFixed(1) + ' мс)',
+       sd === null ? '—' : (sd / q).toFixed(2)]
+    ].map(function (r) { return '<tr><th>' + r[0] + '</th><td>' + r[1] + '</td></tr>'; }).join('');
+  }
+
+  function onEvent(r) {
+    if (r.source !== 'pointer') return;   // экран показывает Pointer, в журнале оба потока
+    if (r.type === 'pointerdown') {
+      counters.down++;
+      downAt[r.pointerId] = r.nowMs;
+      if (r.offsetFromFrameMs !== null) { stOffDown.add(r.offsetFromFrameMs); bin(r.offsetFromFrameMs, histDown); }
+      if (r.beatDeviationMs !== null) stBeat.add(r.beatDeviationMs);
+      zone.textContent = 'тапов: ' + counters.down +
+        (r.beatDeviationMs !== null ? '   доля: ' + r.beatDeviationMs.toFixed(1) + ' мс' : '');
+    } else if (r.type === 'pointerup') {
+      counters.up++;
+      var t0 = downAt[r.pointerId];
+      if (t0 != null) { stDur.add(r.nowMs - t0); delete downAt[r.pointerId]; }
+      else counters.unpaired++;
+    } else if (r.type === 'pointercancel') {
+      counters.cancel++;
+      Log.warn('pointercancel на тапе ' + r.tapIndex);
+    } else if (r.type === 'pointermove') {
+      if (r.offsetFromFrameMs !== null) { stOffMove.add(r.offsetFromFrameMs); bin(r.offsetFromFrameMs, histMove); }
+    }
+    if (counters.down % 5 === 0 || r.type !== 'pointermove') {
+      renderStats();
+      drawHist(histDown, 'pointerdown', document.getElementById('histDown'));
+      drawHist(histMove, 'pointermove (контроль метода)', document.getElementById('histMove'));
+      renderClock();
+    }
+  }
+
+  btnStart.addEventListener('click', function () {
+    stOffDown = new Stat(); stOffMove = new Stat(); stDur = new Stat(); stBeat = new Stat();
+    histDown = new Array(17).fill(0); histMove = new Array(17).fill(0);
+    counters = { down: 0, up: 0, cancel: 0, unpaired: 0 };
+    downAt = Object.create(null);
+
+    var bpm = parseInt(bpmSel.value, 10);
+    metro = bpm > 0 ? new Clock.Metronome({ bpm: bpm }) : null;
+    rec = new Recorder({
+      element: zone, mode: 'both', frames: frames,
+      recordMove: true, preventDefault: false,
+      metronome: metro, onEvent: onEvent
+    });
+    frames.reset();
+    rec.start();
+    frames.watch(function (ms, n) {
+      Log.warn('кадры не идут ' + ms + ' мс (простой №' + n + '): привязка к кадру'
+               + ' на этом участке недостоверна — не уводи страницу из фокуса');
+    });
+    zone.className = 'armed';
+    zone.textContent = 'тапай';
+    btnStart.disabled = true; btnStop.disabled = false; btnExport.disabled = true;
+
+    if (metro) {
+      // Звук стартует из жеста пользователя: iOS иначе не даёт.
+      metro.start().then(function (m) {
+        Log.ok('метроном ' + bpm + ' BPM, перевод шкал: ' + m.method + ', смещение ' + m.offsetMs + ' мс');
+        if (m.method !== 'getOutputTimestamp') Log.warn('getOutputTimestamp недоступен — точность перевода хуже');
+        renderClock();
+      }).catch(function (e) { Log.err('метроном не стартовал: ' + e.message); });
+    }
+    Log.ok('запись пошла');
+  });
+
+  btnStop.addEventListener('click', function () {
+    rec.stop();
+    frames.unwatch();
+    if (metro) metro.stop();
+    zone.className = '';
+    zone.textContent = 'запись остановлена';
+    btnStart.disabled = false; btnStop.disabled = true; btnExport.disabled = false;
+    Log.ok('события: ' + JSON.stringify(rec.counts()));
+    renderStats();
+  });
+
+  btnExport.addEventListener('click', function () {
+    btnExport.disabled = true;
+    var meta = {};
+    try { meta = JSON.parse(localStorage.getItem('ste-meta') || '{}'); } catch (e) {}
+    meta.page = 'timing';
+    meta.stage = 'E2';
+    meta.bpm = metro ? metro.bpm : null;
+    meta.env = environment;
+    var session = rec.session(meta, {
+      calibration: calib,
+      granularityMs: calib.granularityMs,
+      timeOrigin: calib.timeOrigin
+    });
+    Log.line('выгрузка: ' + session.events.length + ' событий, ' + session.frames.length + ' кадров');
+    Export.save(session).then(function () { btnExport.disabled = false; });
+  });
+
+  Log.ok('гранулярность performance.now() = ' + calib.granularityMs + ' мс');
+  if (!environment.hasPointerEvents) {
+    Log.warn('Pointer Events недоступны: в журнал пишется Touch, но таблицы на этом' +
+             ' экране считаются по Pointer и останутся пустыми');
+  }
+  renderClock();
+  renderStats();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Safari Touch Experiment</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; background: #14161a; color: #e8ecf1;
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    padding: calc(env(safe-area-inset-top, 0px) + 16px) 16px calc(env(safe-area-inset-bottom, 0px) + 24px);
+    -webkit-text-size-adjust: 100%;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { color: #9aa4b2; margin: 0 0 20px; }
+  a.mode {
+    display: block; text-decoration: none; color: #e8ecf1;
+    background: #1e2229; border: 1px solid #2d333d; border-radius: 12px;
+    padding: 14px 16px; margin-bottom: 12px;
+  }
+  a.mode b { display: block; font-size: 17px; margin-bottom: 3px; }
+  a.mode span { color: #9aa4b2; font-size: 14px; }
+  .meta { background: #1e2229; border: 1px solid #2d333d; border-radius: 12px; padding: 12px 16px; margin-bottom: 20px; }
+  .meta label { display: block; font-size: 13px; color: #9aa4b2; margin: 8px 0 4px; }
+  .meta input, .meta select {
+    width: 100%; box-sizing: border-box; font-size: 16px; padding: 9px 10px;
+    background: #14161a; color: #e8ecf1; border: 1px solid #39404b; border-radius: 8px;
+  }
+  .note { color: #9aa4b2; font-size: 13px; margin-top: 20px; }
+  code { background: #1e2229; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<h1>Safari Touch Experiment</h1>
+<p class="sub">iPhone 15 / Safari. В1 — живая ли геометрия пятна, В2 — тайминг DOWN.</p>
+
+<div class="meta">
+  <div style="font-size:13px;color:#9aa4b2">Метаданные подставляются во все режимы</div>
+  <label>Участник</label>
+  <input id="participant" placeholder="например p1" autocomplete="off" autocapitalize="off">
+  <label>Номер серии</label>
+  <input id="series" type="text" inputmode="numeric" placeholder="1" autocomplete="off">
+  <label>Заряд, % (Low Power Mode со страницы не читается)</label>
+  <input id="batteryPct" type="text" inputmode="numeric" placeholder="85" autocomplete="off">
+  <label>Режим энергосбережения</label>
+  <select id="lowPower">
+    <option value="">не указан</option>
+    <option value="off">выключен</option>
+    <option value="on">включён</option>
+  </select>
+  <label>Заметки (яркость, ориентация, условия)</label>
+  <input id="notes" placeholder="портрет, яркость ~70%" autocomplete="off">
+</div>
+
+<a class="mode" href="probe.html"><b>Э1 — пробник каналов</b>
+  <span>Какие поля живые. 20 тапов: 10 мягких, 10 резких. Ответ на В1 получается здесь.</span></a>
+<a class="mode" href="timing.html"><b>Э2 — тайминговый стенд</b>
+  <span>Часы, границы кадров, метроном. Строится независимо от исхода Э1.</span></a>
+<a class="mode" href="collect.html"><b>Э3 — серия по протоколу</b>
+  <span>Съёмка по шагам: метроном, свободные тапы, площадь, контрольные потоки.</span></a>
+
+<p class="note">Страница должна быть открыта по <code>https</code> через туннель, а не по
+LAN-адресу. Симулятор и скриптовые тапы для измерений невалидны (PLAN §8).</p>
+
+<script src="js/log.js"></script>
+<script src="js/clock.js"></script>
+<script>
+// Среда проверяется до выбора режима: узнать, что серия снята во встроенном
+// браузере мессенджера, лучше здесь, чем после двадцати тапов.
+(function () {
+  var kind = Clock.env().browserKind;
+  if (kind === 'in-app-webview') {
+    Log.banner('Это встроенный браузер приложения, а не Safari. Открой ссылку в Safari: '
+               + 'меню «Поделиться» или «…» → «Открыть в Safari». Съёмка здесь заблокирована.');
+  } else if (kind === 'other-ios-browser') {
+    Log.banner('Это сторонний браузер iOS, а не Safari. Открой ссылку в Safari.');
+  } else if (kind !== 'safari') {
+    Log.banner('Похоже, это не Safari на iPhone: страница откроется, но снятое здесь'
+               + ' измерением не считается.');
+  }
+})();
+</script>
+<script>
+// Метаданные держатся в localStorage: набирать их заново на каждой странице
+// с телефона — верный способ снять серию без номера.
+(function () {
+  var KEYS = ['participant', 'series', 'batteryPct', 'lowPower', 'notes'];
+  var saved = {};
+  try { saved = JSON.parse(localStorage.getItem('ste-meta') || '{}'); } catch (e) { saved = {}; }
+  KEYS.forEach(function (k) {
+    var el = document.getElementById(k);
+    if (saved[k] != null) el.value = saved[k];
+    el.addEventListener('change', store);
+    el.addEventListener('input', store);
+  });
+  function store() {
+    var out = {};
+    KEYS.forEach(function (k) { out[k] = document.getElementById(k).value; });
+    try { localStorage.setItem('ste-meta', JSON.stringify(out)); } catch (e) {}
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Э3 — серия по протоколу</title>
+<style>
+  :root { color-scheme: dark; }
+  * { -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; background: #14161a; color: #e8ecf1;
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    padding: calc(env(safe-area-inset-top, 0px) + 10px) 12px calc(env(safe-area-inset-bottom, 0px) + 16px);
+    -webkit-text-size-adjust: 100%; -webkit-user-select: none; user-select: none;
+  }
+  h1 { font-size: 17px; margin: 0 0 8px; }
+  h1 a { color: #6fa8ff; text-decoration: none; font-weight: normal; font-size: 14px; margin-left: 8px; }
+  .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  button, select {
+    flex: 1 1 auto; min-width: 86px; font-size: 15px; padding: 11px 12px;
+    background: #273041; color: #e8ecf1; border: 1px solid #39465c; border-radius: 10px;
+  }
+  select { background: #14161a; }
+  button.primary { background: #2b5fd9; border-color: #2b5fd9; }
+  button.warn { background: #7a3a24; border-color: #a04a2c; }
+  button:disabled { opacity: .45; }
+  #zone {
+    margin: 12px 28px; height: 190px; border-radius: 18px;
+    background: #1b2330; border: 3px dashed #39465c; touch-action: none;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; color: #9aa4b2;
+  }
+  #zone.soft { border-color: #3aa06a; }
+  #zone.sharp { border-color: #d9703a; }
+  #zone.plain { border-color: #2b5fd9; }
+  #zone.done { border-color: #6fa8ff; background: #1b2b40; }
+  #zoneTitle { font-size: 26px; font-weight: 600; color: #e8ecf1; }
+  #zoneSub { font-size: 15px; margin-top: 6px; }
+  .card { background: #1a1e25; border: 1px solid #2d333d; border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; }
+  .card h2 { font-size: 13px; margin: 0 0 6px; color: #9aa4b2; font-weight: normal; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 2px 4px; }
+  th { color: #9aa4b2; font-weight: normal; width: 52%; }
+  td { font-family: ui-monospace, Menlo, monospace; }
+  pre#log {
+    margin: 0; background: #0f1115; border: 1px solid #2d333d; border-radius: 10px;
+    padding: 8px; height: 120px; overflow: auto; font-size: 11px; line-height: 1.35;
+    font-family: ui-monospace, Menlo, monospace; white-space: pre; -webkit-overflow-scrolling: touch;
+  }
+  .hint { color: #9aa4b2; font-size: 12px; margin: 4px 0 8px; }
+</style>
+</head>
+<body>
+<h1>Э3 — серия по протоколу<a href="index.html">← режимы</a></h1>
+
+<div class="row">
+  <select id="protocol">
+    <option value="timing-metronome">тайминг: 60 тапов по метроному 100 BPM</option>
+    <option value="timing-free">тайминг: 40 свободных тапов</option>
+    <option value="area">площадь: 60 тапов, 30 мягких + 30 резких</option>
+    <option value="control-touch">контроль: 20 тапов, только Touch</option>
+    <option value="control-pointer">контроль: 20 тапов, только Pointer</option>
+  </select>
+</div>
+<p class="hint" id="protoHint"></p>
+<div class="row">
+  <button id="start" class="primary">Старт</button>
+  <button id="abort" class="warn" disabled>Прервать</button>
+  <button id="export" disabled>Выгрузить</button>
+</div>
+
+<div id="zone"><div id="zoneTitle">готов</div><div id="zoneSub">выбери протокол и жми «Старт»</div></div>
+
+<div class="card"><h2>ход серии</h2><table id="tRun"></table></div>
+<pre id="log"></pre>
+
+<script src="js/log.js"></script>
+<script src="js/clock.js"></script>
+<script src="js/recorder.js"></script>
+<script src="js/export.js"></script>
+<script>
+(function () {
+  'use strict';
+  Log.attach('log');
+
+  /* Протоколы съёмки (PLAN §8). Площадные серии снимаются только если Э1 дал
+     живую геометрию; блоки градаций чередуются, стартовая градация меняется
+     между сериями. */
+  var PROTOCOLS = {
+    'timing-metronome': {
+      taps: 60, mode: 'both', bpm: 100, blocks: null, recordMove: true,
+      hint: 'Попадай тапом в щелчок. Звук нужен: проверь, что переключатель «Бесшумно» выключен.'
+    },
+    'timing-free': {
+      taps: 40, mode: 'both', bpm: 0, blocks: null, recordMove: true,
+      hint: 'Свободные тапы в своём темпе — нужна раздача длительности контакта DOWN→UP.'
+    },
+    'area': {
+      taps: 60, mode: 'both', bpm: 0, blocks: 10, recordMove: true,
+      hint: 'Блоки по 10: мягко — подушечкой, без нажима; резко — кончиком, коротко и жёстко.'
+    },
+    'control-touch': {
+      taps: 20, mode: 'touch', bpm: 0, blocks: null, recordMove: false,
+      hint: 'Контрольная: только Touch Events. Нужна, потому что второй поток искажает первый.'
+    },
+    'control-pointer': {
+      taps: 20, mode: 'pointer', bpm: 0, blocks: null, recordMove: false,
+      hint: 'Контрольная: только Pointer Events. Сравнение с совмещённой серией — критерий A7.'
+    }
+  };
+
+  var zone = document.getElementById('zone');
+  var zoneTitle = document.getElementById('zoneTitle');
+  var zoneSub = document.getElementById('zoneSub');
+  var selProto = document.getElementById('protocol');
+  var btnStart = document.getElementById('start');
+  var btnAbort = document.getElementById('abort');
+  var btnExport = document.getElementById('export');
+  var hint = document.getElementById('protoHint');
+
+  var calib = Clock.calibrate(200);
+  var environment = Clock.env();
+  var frames = new Clock.Frames().start();
+
+  /* Среда съёмки. Встроенный WebView мессенджера — не Safari: другой процесс,
+     другие ограничения, и серия из него отвечает на другой вопрос (PLAN §1).
+     Поэтому в WebView и в сторонних браузерах iOS съёмка не даётся. */
+  (function () {
+    var kind = environment.browserKind;
+    if (kind === 'safari') return;
+    if (kind === 'in-app-webview' || kind === 'other-ios-browser') {
+      Log.banner(kind === 'in-app-webview'
+        ? 'Это встроенный браузер приложения, а не Safari. Серия отсюда недействительна. '
+          + 'Открой ссылку в Safari: меню «Поделиться» или «…» → «Открыть в Safari».'
+        : 'Это сторонний браузер iOS, а не Safari. Открой ссылку в Safari.');
+      Log.err('среда: ' + kind + ' — съёмка заблокирована');
+      btnStart.disabled = true;
+      btnStart.textContent = 'нужен Safari';
+    } else {
+      Log.banner('Похоже, это не Safari на iPhone. Страница работает, но снятое здесь'
+                 + ' измерением не считается — проверяй стенд, а не устройство.');
+      Log.warn('среда: ' + kind);
+    }
+  })();
+  var rec = null, metro = null, proto = null, protoName = null;
+  var taps = 0, cancels = 0, startGrade = 'soft';
+  var awaitingLastUp = false, lastUpTimer = null;
+
+  function meta() {
+    var m = {};
+    try { m = JSON.parse(localStorage.getItem('ste-meta') || '{}'); } catch (e) {}
+    return m;
+  }
+
+  function gradeAt(n) {
+    if (!proto.blocks) return null;
+    var block = Math.floor(n / proto.blocks);
+    var flip = (block % 2 === 1);
+    var first = startGrade;
+    var second = startGrade === 'soft' ? 'sharp' : 'soft';
+    return flip ? second : first;
+  }
+
+  function renderRun() {
+    var rows = [
+      ['протокол', protoName || '—'],
+      ['тапов', taps + ' / ' + (proto ? proto.taps : '—')],
+      ['режим потоков', proto ? proto.mode : '—'],
+      ['отмен (pointercancel/touchcancel)', cancels],
+      ['кадров', frames.times.length + ' (период ' + frames.periodMs() + ' мс)'],
+      ['гранулярность часов', calib.granularityMs + ' мс']
+    ];
+    document.getElementById('tRun').innerHTML = rows.map(function (r) {
+      return '<tr><th>' + r[0] + '</th><td>' + r[1] + '</td></tr>';
+    }).join('');
+  }
+
+  function showStep() {
+    var left = proto.taps - taps;
+    var grade = gradeAt(taps);
+    if (grade) {
+      zone.className = grade;
+      zoneTitle.textContent = grade === 'soft' ? 'МЯГКО' : 'РЕЗКО';
+      var inBlock = proto.blocks - (taps % proto.blocks);
+      zoneSub.textContent = 'в блоке осталось ' + inBlock + ', всего ' + left;
+      rec.setLabel(grade);
+    } else {
+      zone.className = 'plain';
+      zoneTitle.textContent = String(left);
+      zoneSub.textContent = proto.bpm ? 'тапай в щелчок' : 'тапай в своём темпе';
+      rec.setLabel(null);
+    }
+  }
+
+  // Тап считает рекордер по открытию и закрытию контакта: порядок потоков у
+  // разных движков разный (в Safari pointerdown раньше touchstart), а запись
+  // должна закрываться, только когда закрылись оба.
+  function armFinish() {
+    awaitingLastUp = true;
+    zoneSub.textContent = 'отпусти палец';
+    lastUpTimer = setTimeout(function () {
+      Log.warn('UP последнего тапа не пришёл за 2 с — закрываю серию как есть');
+      finish('серия снята');
+    }, 2000);
+  }
+
+  function onEvent(r) {
+    if (r.type === 'pointercancel' || r.type === 'touchcancel') {
+      cancels++;
+      Log.warn('отмена контакта на тапе ' + taps + ': ' + r.type);
+    }
+  }
+
+  function onTapStart() {
+    if (awaitingLastUp) return;
+    taps++;
+    if (taps >= proto.taps) armFinish();
+    else { showStep(); renderRun(); }   // градация назначается следующему тапу
+  }
+
+  function onTapEnd() {
+    if (awaitingLastUp) finish('серия снята');
+  }
+
+  function finish(reason) {
+    if (lastUpTimer !== null) { clearTimeout(lastUpTimer); lastUpTimer = null; }
+    awaitingLastUp = false;
+    if (rec) rec.stop();
+    frames.unwatch();
+    if (metro) metro.stop();
+    zone.className = 'done';
+    zoneTitle.textContent = String(taps);
+    zoneSub.textContent = reason + ' — жми «Выгрузить»';
+    btnStart.disabled = false; btnAbort.disabled = true; btnExport.disabled = false;
+    renderRun();
+    Log.ok(reason + ': ' + taps + ' тапов, события ' + JSON.stringify(rec.counts()));
+    Log.warn('выгрузи серию сейчас: повторить её в тех же условиях нельзя');
+  }
+
+  selProto.addEventListener('change', function () {
+    hint.textContent = PROTOCOLS[selProto.value].hint;
+  });
+  hint.textContent = PROTOCOLS[selProto.value].hint;
+
+  btnStart.addEventListener('click', function () {
+    protoName = selProto.value;
+    proto = PROTOCOLS[protoName];
+    taps = 0; cancels = 0; awaitingLastUp = false;
+    // Порядок градаций меняется между сериями: чётная серия начинает с резких.
+    var seriesNum = parseInt(meta().series, 10);
+    startGrade = (isFinite(seriesNum) && seriesNum % 2 === 0) ? 'sharp' : 'soft';
+
+    metro = proto.bpm ? new Clock.Metronome({ bpm: proto.bpm }) : null;
+    rec = new Recorder({
+      element: zone, mode: proto.mode, frames: frames,
+      recordMove: proto.recordMove, preventDefault: false,
+      metronome: metro, onEvent: onEvent,
+      onTapStart: onTapStart, onTapEnd: onTapEnd
+    });
+    frames.reset();
+    rec.start();
+    frames.watch(function (ms, n) {
+      Log.warn('кадры не идут ' + ms + ' мс (простой №' + n + '): привязка к кадру'
+               + ' на этом участке недостоверна — не уводи страницу из фокуса');
+    });
+    showStep();
+    renderRun();
+    btnStart.disabled = true; btnAbort.disabled = false; btnExport.disabled = true;
+
+    if (metro) {
+      metro.start().then(function (m) {
+        Log.ok('метроном ' + proto.bpm + ' BPM, перевод шкал: ' + m.method);
+        if (m.method !== 'getOutputTimestamp') Log.warn('getOutputTimestamp недоступен — точность перевода хуже');
+      }).catch(function (e) { Log.err('метроном не стартовал: ' + e.message); });
+    }
+    Log.ok('старт: ' + protoName + ', ' + proto.taps + ' тапов, режим ' + proto.mode +
+           (proto.blocks ? ', первый блок ' + startGrade : ''));
+  });
+
+  btnAbort.addEventListener('click', function () { finish('серия прервана'); });
+
+  btnExport.addEventListener('click', function () {
+    btnExport.disabled = true;
+    var m = meta();
+    m.page = 'collect';
+    m.stage = 'E3';
+    m.protocol = protoName;
+    m.plannedTaps = proto.taps;
+    m.actualTaps = taps;
+    m.blockSize = proto.blocks;
+    m.startGrade = proto.blocks ? startGrade : null;
+    m.bpm = proto.bpm || null;
+    m.env = environment;
+    var session = rec.session(m, {
+      calibration: calib,
+      granularityMs: calib.granularityMs,
+      timeOrigin: calib.timeOrigin
+    });
+    Log.line('выгрузка: ' + session.events.length + ' событий, ' + session.frames.length + ' кадров');
+    Export.save(session).then(function (res) {
+      btnExport.disabled = false;
+      if (res.server) Log.ok('серия на ноутбуке: ' + res.server.file);
+    });
+  });
+
+  renderRun();
+  Log.ok('гранулярность performance.now() = ' + calib.granularityMs + ' мс');
+})();
+</script>
+</body>
+</html>
