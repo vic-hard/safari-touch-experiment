@@ -24,6 +24,7 @@ import csv
 import json
 import math
 import os
+import re
 import statistics
 import sys
 from collections import Counter
@@ -91,11 +92,19 @@ def head(title):
 # --- контакты и признак ----------------------------------------------------
 
 def area_touch(e):
-    """Площадь эллипса пятна по Touch Events."""
+    """Площадь эллипса пятна по Touch Events.
+
+    Нулевой radiusY — это не пятно нулевой площади, а отсутствующая половина
+    канала: на iPhone 16 Pro Max / iOS 26 WebKit отдаёт radiusX живым, а radiusY
+    держит нулём, тогда как Pointer на том же контакте сообщает height = width.
+    Перемножить их как есть значило бы получить площадь 0 на всей серии и молча
+    похоронить поток. Считаем пятно кругом по живому радиусу — ровно то же
+    допущение, которое делает сам WebKit в Pointer Events.
+    """
     rx, ry = e.get("radiusX"), e.get("radiusY")
     if not isinstance(rx, (int, float)):
         return None
-    if not isinstance(ry, (int, float)):
+    if not isinstance(ry, (int, float)) or ry == 0:
         ry = rx
     return math.pi * rx * ry
 
@@ -157,7 +166,7 @@ def feature(contact, source):
 
 def a1_channels(sessions):
     head("A1 — живая геометрия или константа")
-    live = {}
+    live, two_step, zero_ry = {}, {}, False
     for source, fields in (("touch", GEOMETRY_TOUCH), ("pointer", GEOMETRY_POINTER)):
         for f in fields:
             vals, nonnull = [], []
@@ -181,20 +190,33 @@ def a1_channels(sessions):
             elif len(distinct) == 2:
                 # Два значения на весь канал — это не градация, а ступенька
                 # (например разные значения на down и на move). Для признака
-                # площади такой канал непригоден, живым не считается.
-                state, is_live = ("почти константа: два значения %s и %s"
-                                  % (distinct[0], distinct[1])), False
+                # площади такой канал непригоден, живым не считается. Но на
+                # короткой серии двумя ступенями дело может ограничиться и у
+                # живого канала, поэтому вывод разделён по объёму съёмки.
+                state, is_live = ("две ступени, %s и %s%s"
+                                  % (distinct[0], distinct[1],
+                                     " — на такой короткой съёмке это ещё не вывод"
+                                     if len(vals) < 100 else ": для признака площади непригоден")), False
             else:
                 state = ("живой: %s … %s, различных значений %d"
                          % (distinct[0], distinct[-1], len(distinct)))
                 is_live = True
             live["%s.%s" % (source, f)] = is_live
+            if len(distinct) == 2 and f in ("radiusX", "radiusY", "width", "height"):
+                two_step["%s.%s" % (source, f)] = len(vals)
+            if source == "touch" and f == "radiusY" and distinct == [0]:
+                zero_ry = True
             print("  %-8s %-16s непустых %4d/%-4d  %s"
                   % (source, f, len(nonnull), len(vals), state))
             if is_live and len(distinct) <= 12:
                 print("           значения: %s" % ", ".join(str(x) for x in distinct))
 
     print()
+    if zero_ry and (live.get("touch.radiusX") or "touch.radiusX" in two_step):
+        print("  radiusY на всей съёмке нулевой при живом radiusX: половины канала у Touch")
+        print("  нет. Площадь по Touch считается кругом по radiusX — так же, как её подаёт")
+        print("  Pointer (height = width). Эллипс из этих данных не восстанавливается.")
+        print()
     touch_live = live.get("touch.radiusX") or live.get("touch.radiusY")
     pointer_live = live.get("pointer.width") or live.get("pointer.height")
     if touch_live or pointer_live:
@@ -202,11 +224,23 @@ def a1_channels(sessions):
               % ("Touch" if touch_live else "",
                  " и " if touch_live and pointer_live else "",
                  "Pointer" if pointer_live else ""))
+    elif two_step:
+        names = ", ".join(sorted(two_step))
+        if max(two_step.values()) >= 100:
+            print("  вывод A1: на полной съёмке канал отдал ровно две ступени (%s)." % names)
+            print("  Это уже свойство канала, а не нехватка тапов: ступеней здесь вдвое-втрое")
+            print("  меньше, чем на iPhone 15 (там 4 у Touch и 6 у Pointer). Порог у фильтра")
+            print("  в таком канале один-единственный — между этими двумя значениями.")
+        else:
+            print("  вывод A1: канал отдал ровно две ступени (%s). Это или грубость" % names)
+            print("  канала, или короткая съёмка: на двух десятках тапов двумя значениями")
+            print("  дело обходится и у живого канала. Отличает их серия на 60 тапов —")
+            print("  до неё вывод «геометрия константа» не делается.")
     else:
         print("  вывод A1: геометрия константа — это отрицательный результат, а не")
         print("  брак записи (PLAN §10). Площадная половина закрывается, тайминговая")
         print("  от этого не зависит.")
-    return touch_live, pointer_live
+    return touch_live, pointer_live, dict(two_step)
 
 
 def collect_features(sessions, source):
@@ -338,6 +372,84 @@ def within_contact_dynamics(sessions):
             print("           контакт» здесь вырождается в «значение при касании»")
 
 
+def contact_span(contact):
+    """Сдвиг пальца за контакт (px) и длительность контакта (мс)."""
+    xs = [(e.get("clientX"), e.get("clientY")) for e in contact["events"]]
+    xs = [(x, y) for x, y in xs
+          if isinstance(x, (int, float)) and isinstance(y, (int, float))]
+    shift = None
+    if len(xs) >= 2:
+        x0, y0 = xs[0]
+        shift = max(math.hypot(x - x0, y - y0) for x, y in xs[1:])
+    ts = [e.get("timeStamp") for e in contact["events"]]
+    ts = [t for t in ts if isinstance(t, (int, float))]
+    dur = (max(ts) - min(ts)) if len(ts) >= 2 else None
+    return shift, dur
+
+
+def confounds(sessions, source):
+    """Что ещё меняется вместе с градацией, кроме площади.
+
+    Классифицируется резкость тапа, а не сила нажатия, поэтому микросдвиг и
+    длительность — такие же законные её проявления, как размер пятна: это не
+    брак разметки. Считаются они ради честного имени результату и ради переноса:
+    признак SF §5 берёт максимум за контакт, и на контакте с движением это
+    площадь не в момент удара, а в момент, когда палец поехал. «Площадь пятна» и
+    «площадь плюс микродвижение» ведут себя по-разному на другом устройстве и у
+    другого игрока, так что знать, чем именно разделены градации, нужно.
+    """
+    head("что ещё различает градации, кроме площади (поток %s)" % source)
+    per_label = {}
+    for _, session in sessions:
+        for c in contacts(session, source):
+            lab = c["label"] or "без метки"
+            f = feature(c, source)
+            areas = [AREA_FN[source](e) for e in c["events"]]
+            areas = [a for a in areas if isinstance(a, (int, float))]
+            shift, dur = contact_span(c)
+            row = per_label.setdefault(lab, {"n": 0, "moved": 0, "shifts": [],
+                                             "durs": [], "gained": 0})
+            row["n"] += 1
+            if shift is not None:
+                row["shifts"].append(shift)
+                if shift > 0.5:
+                    row["moved"] += 1
+            if dur is not None:
+                row["durs"].append(dur)
+            if areas and f is not None and f > areas[0]:
+                row["gained"] += 1
+
+    if not per_label:
+        print("  контактов нет")
+        return
+    print("  %-10s %5s %14s %12s %14s" % ("градация", "n", "палец двигался",
+                                          "сдвиг, px", "длительность, мс"))
+    for lab in sorted(per_label):
+        r = per_label[lab]
+        shift_s = "%.1f" % statistics.median(r["shifts"]) if r["shifts"] else "—"
+        dur_s = "%.0f" % statistics.median(r["durs"]) if r["durs"] else "—"
+        print("  %-10s %5d %14s %12s %14s"
+              % (lab, r["n"], "%d (%.0f%%)" % (r["moved"], 100.0 * r["moved"] / r["n"]),
+                 shift_s, dur_s))
+    print("  «палец двигался» — сдвиг больше 0.5 px, «сдвиг» и «длительность» — медианы.")
+    for lab in sorted(per_label):
+        r = per_label[lab]
+        print("  %-10s максимум за контакт оказался выше первого отсчёта у %d из %d"
+              % (lab, r["gained"], r["n"]))
+    labs = [l for l in ("soft", "sharp") if l in per_label]
+    if len(labs) == 2:
+        a, b = (per_label[l] for l in labs)
+        rate = [100.0 * r["moved"] / r["n"] for r in (a, b)]
+        if abs(rate[0] - rate[1]) >= 25:
+            print()
+            print("  движение распределено по градациям неравномерно (%.0f%% против %.0f%%):"
+                  % (rate[0], rate[1]))
+            print("      часть разделения даёт не размер пятна, а сам факт микросдвига.")
+            print("      Для метки «резкость тапа» это законный признак, но называть его")
+            print("      площадью нельзя, и переносится он хуже: зависит от того, как")
+            print("      конкретная рука довершает удар.")
+
+
 def run_for_source(loaded, source, args, holdout):
     """Полный расчёт A10 по одному потоку."""
     rows = collect_features(loaded, source)
@@ -414,6 +526,45 @@ def main(argv=None):
         print("      Считаю как просили, но число A10 при такой смеси не сопоставимо")
         print("      ни с эталоном, ни с другими прогонами.")
 
+    # Участник и устройство. Стенд раздаётся по одной ссылке, и серии разных
+    # людей приходят в один и тот же data/ — разойтись они могут только по
+    # метаданным. Порог калибруется под руку и под сенсор: ступень 12.077 своя
+    # у каждой модели, а размер пятна — у каждого пальца, поэтому обучение на
+    # одном человеке с проверкой на другом отвечает не на тот вопрос.
+    people = {}
+    devices = {}
+    for name, session in loaded:
+        meta = session.get("meta") or {}
+        env = meta.get("env") or {}
+        people.setdefault(meta.get("participant"), []).append(name)
+        devices.setdefault((env.get("userAgent"), env.get("screenWidth"),
+                            env.get("screenHeight"), env.get("devicePixelRatio")),
+                           []).append(name)
+    if len(people) > 1:
+        print()
+        print("  [!] В ОДНОМ РАСЧЁТЕ СЕРИИ РАЗНЫХ УЧАСТНИКОВ:")
+        for who, names in people.items():
+            print("      %-28s %d серия(й)" % (who, len(names)))
+        print("      Порог снимается с руки участника: обучение на одном человеке")
+        print("      и проверка на другом дают число, которое не описывает ни одного.")
+        print("      Считай каждого участника отдельным прогоном.")
+    if len(devices) > 1:
+        print()
+        print("  [!] В ОДНОМ РАСЧЁТЕ СЕРИИ С РАЗНЫХ УСТРОЙСТВ:")
+        for dev, names in devices.items():
+            ua = str(dev[0] or "")
+            ver = re.search(r"Version/[\d.]+", ua)
+            os_v = re.search(r"OS (\d+[_\d]*)", ua)
+            label = "%sx%s @%s" % (dev[1], dev[2], dev[3])
+            if os_v:
+                label += ", iOS " + os_v.group(1).replace("_", ".")
+            if ver:
+                label += ", " + ver.group(0)
+            print("      %-40s %d серия(й)" % (label, len(names)))
+        print("      Ступень квантования канала своя у каждой модели — абсолютный")
+        print("      порог между устройствами не переносится (та же причина, по")
+        print("      которой он не переносится с Android).")
+
     print("сессий загружено: %d" % len(loaded))
     for name, session in loaded:
         meta = session.get("meta") or {}
@@ -423,7 +574,7 @@ def main(argv=None):
         if kind and kind != "safari":
             print("      [!] СРЕДА НЕ SAFARI (%s) — серия не является измерением" % kind)
 
-    touch_live, pointer_live = a1_channels(loaded)
+    touch_live, pointer_live, two_step = a1_channels(loaded)
     within_contact_dynamics(loaded)
 
     holdout = os.path.basename(args.holdout) if args.holdout else loaded[-1][0]
@@ -431,12 +582,19 @@ def main(argv=None):
         sources = [src for src, live in (("touch", touch_live), ("pointer", pointer_live)) if live]
         if not sources:
             print()
-            print("  A10 не считается: живого канала геометрии нет.")
+            if two_step:
+                print("  A10 по умолчанию не считается: канал дал только две ступени.")
+                print("  Признак из двух значений — это не шкала, а один порог, и обычная")
+                print("  оговорка «порог настраивается» к нему не относится. Посчитать в")
+                print("  этом виде: --source pointer (или touch).")
+            else:
+                print("  A10 не считается: живого канала геометрии нет.")
             return 0
     else:
         sources = [args.source]
 
     for src in sources:
+        confounds(loaded, src)
         head("A10 по потоку %s" % src)
         run_for_source(loaded, src, args, holdout)
     return 0
