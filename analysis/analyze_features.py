@@ -36,6 +36,7 @@
 """
 
 import argparse
+import bisect
 import math
 import os
 import statistics
@@ -101,15 +102,46 @@ def area_of(contact, source, window_ms=None):
     return max(vals) if vals else None
 
 
+def beat_grid(session):
+    """Полная сетка долей метронома из сессии, мс по шкале performance.now()."""
+    metro = session.get("metronome") or {}
+    times = [b.get("perfTimeMs") for b in (metro.get("beats") or [])]
+    return sorted(t for t in times if isinstance(t, (int, float)))
+
+
+def beat_deviation(ts, grid):
+    """Отклонение тапа от ближайшей доли, мс; минус — раньше щелчка.
+
+    Поле beatDeviationMs из записи для этого не годится: страница считает его в
+    момент тапа, а планировщик метронома ставит щелчки лишь на 300 мс вперёд,
+    поэтому тап, сделанный раньше этого горизонта, привязывается к предыдущей
+    доле и даёт отклонение почти в целую долю. По полной сетке из сессии такой
+    ошибки нет — так же считается A8 в analyze_timing.
+    """
+    if not grid or not isinstance(ts, (int, float)):
+        return None
+    i = bisect.bisect_left(grid, ts)
+    best = None
+    for j in (i - 1, i, i + 1):
+        if 0 <= j < len(grid):
+            d = ts - grid[j]
+            if best is None or abs(d) < abs(best):
+                best = d
+    return best
+
+
 def contact_rows(session, source, window_ms):
+    grid = beat_grid(session)
     rows = []
     for c in area_mod.contacts(session, source):
         label = c.get("label")
         if label not in ("soft", "sharp"):
             continue
+        down = c["events"][0]
         rows.append({
             "label": label,
             "tapIndex": c.get("tapIndex"),
+            "beatDeviationMs": beat_deviation(down.get("timeStamp"), grid),
             "area": area_mod.feature(c, source),
             "areaW": area_of(c, source, window_ms),
             "shift": shift_of(c),
@@ -118,12 +150,35 @@ def contact_rows(session, source, window_ms):
     return rows
 
 
-def thresholds(train, keys):
-    """Порог по каждому признаку — максимум по мягким обучающим (SF §7.5)."""
+def quantile(values, q):
+    """Квантиль по возрастанию, линейная интерполяция; q=1.0 — максимум."""
+    vals = sorted(values)
+    if not vals:
+        return None
+    if q >= 1.0:
+        return vals[-1]
+    pos = (len(vals) - 1) * q
+    lo = int(pos)
+    hi = min(lo + 1, len(vals) - 1)
+    return vals[lo] + (vals[hi] - vals[lo]) * (pos - lo)
+
+
+def thresholds(train, keys, soft_quantile=1.0):
+    """Порог по каждому признаку — квантиль по мягким обучающим.
+
+    По умолчанию квантиль единичный, то есть максимум: так задано в SF §7.5 и
+    так фильтр пропускает все обучающие мягкие тапы. У этого правила есть цена,
+    которая на квантованном канале становится решающей: один случайный мягкий
+    тап, попавший ступенью выше, поднимает порог над всем диапазоном, и признак
+    перестаёт отсеивать что-либо вообще (на сериях под метроном ровно это и
+    произошло с площадью). Квантиль меньше единицы отдаёт такие выбросы в
+    обмен на работающий порог — но это уже другое правило, и проверять его надо
+    на серии, снятой после того, как оно зафиксировано.
+    """
     out = {}
     for k in keys:
         vals = [r[k] for r in train if r["label"] == "soft" and r[k] is not None]
-        out[k] = max(vals) if vals else None
+        out[k] = quantile(vals, soft_quantile) if vals else None
     return out
 
 
@@ -138,8 +193,8 @@ def passes(row, thr):
     return True
 
 
-def evaluate(train, test, keys):
-    thr = thresholds(train, keys)
+def evaluate(train, test, keys, soft_quantile=1.0):
+    thr = thresholds(train, keys, soft_quantile)
     soft = [r for r in test if r["label"] == "soft"]
     sharp = [r for r in test if r["label"] == "sharp"]
     return {
@@ -149,6 +204,117 @@ def evaluate(train, test, keys):
         "sharp_rejected": sum(1 for r in sharp if not passes(r, thr)),
         "sharp_total": len(sharp),
     }
+
+
+def parse_thresholds(text, window_ms):
+    """«area50=2336.369,shift50=0» → {'areaW': 2336.369, 'shiftW': 0.0}.
+
+    Имена те же, что в docs/protocol.md: area, shift — по всему контакту,
+    areaNN, shiftNN — по окну NN мс. Окно в имени обязано совпасть с --window,
+    иначе правило считалось бы не то, которое зафиксировано.
+    """
+    out = {}
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, value = part.partition("=")
+        name, value = name.strip(), value.strip()
+        try:
+            value = float(value)
+        except ValueError:
+            raise SystemExit("порог %r не число" % part)
+        if name in ("area", "shift"):
+            out[name] = value
+            continue
+        for base in ("area", "shift"):
+            if name.startswith(base) and name[len(base):].isdigit():
+                if int(name[len(base):]) != window_ms:
+                    raise SystemExit(
+                        "порог %s не сходится с окном --window %d: правило зафиксировано"
+                        " на другом окне" % (name, window_ms))
+                out[base + "W"] = value
+                break
+        else:
+            raise SystemExit("непонятное имя порога %r (ожидалось area, shift,"
+                             " area<мс>, shift<мс>)" % name)
+    if not out:
+        raise SystemExit("--thresholds пуст")
+    return out
+
+
+def warn_near_miss(rows_by_name, thr):
+    """Порог, лежащий чуть ниже реального значения признака, — частая ошибка.
+
+    Значения канала квантованы, и порог, выписанный с округлением вниз (5254.945
+    вместо 5254.945081), отсекает целую ступень: тапы, сидящие ровно на ней,
+    становятся «резкими». Разница в тысячных, а ответ меняется на десятки тапов.
+    """
+    rows = [r for rs in rows_by_name.values() for r in rs]
+    for key, limit in sorted(thr.items()):
+        if limit is None:
+            continue
+        near = [r[key] for r in rows
+                if isinstance(r.get(key), (int, float)) and 0 < r[key] - limit <= 0.01]
+        if near:
+            print("  [!] порог %s = %.6f лежит на %.6f ниже значения %.6f, которое"
+                  % (key, limit, min(near) - limit, min(near)))
+            print("      встречается в данных %d раз. Похоже на потерю точности при"
+                  % len(near))
+            print("      выписывании порога: проверь, не округлён ли он вниз.")
+
+
+def frozen_check(rows_by_name, thr, window_ms):
+    """Правило с заранее зафиксированными порогами: обучения нет вовсе."""
+    head("проверка зафиксированным правилом (обучение не проводится)")
+    print("  пороги: %s" % ", ".join(
+        "%s ≤ %.6f" % (k.replace("W", str(window_ms)), v) for k, v in sorted(thr.items())))
+    warn_near_miss(rows_by_name, thr)
+    print()
+    print("  %-46s %-16s %s" % ("серия", "мягких прошло", "резких отсеяно"))
+    soft_ok = soft_n = sharp_ok = sharp_n = 0
+    for name, rows in rows_by_name.items():
+        soft = [r for r in rows if r["label"] == "soft"]
+        sharp = [r for r in rows if r["label"] == "sharp"]
+        sp = sum(1 for r in soft if passes(r, thr))
+        rj = sum(1 for r in sharp if not passes(r, thr))
+        soft_ok += sp; soft_n += len(soft); sharp_ok += rj; sharp_n += len(sharp)
+        print("  %-46s %-16s %s"
+              % (name, "%d из %d" % (sp, len(soft)), "%d из %d" % (rj, len(sharp))))
+    if len(rows_by_name) > 1 and sharp_n:
+        print("  %-46s %-16s %s"
+              % ("ВСЕ ВМЕСТЕ", "%d из %d" % (soft_ok, soft_n),
+                 "%d из %d (%.0f%%)" % (sharp_ok, sharp_n, 100.0 * sharp_ok / sharp_n)))
+    if soft_n and soft_ok < soft_n:
+        print()
+        print("  потеряно мягких: %d из %d (%.0f%%). Правило SF (порог = максимум по мягким)"
+              % (soft_n - soft_ok, soft_n, 100.0 * (soft_n - soft_ok) / soft_n))
+        print("      требует пропускать все, и тогда это уже незачёт; процентильное правило")
+        print("      единичные потери допускает — сверься с критерием в docs/protocol.md.")
+
+
+def beat_report(rows_by_name):
+    """Попадание по щелчку метронома по градациям.
+
+    Нужно, чтобы отличить «фильтр работает» от «фильтр работает, но мягкий тап
+    выбивает игрока из темпа»: в игре это два разных исхода.
+    """
+    rows = [r for rs in rows_by_name.values() for r in rs
+            if isinstance(r.get("beatDeviationMs"), (int, float))]
+    if not rows:
+        return
+    head("попадание по щелчку метронома, по градациям")
+    print("  %-8s %5s %14s %14s" % ("градация", "n", "|отклонение|", "СКО отклонения"))
+    for label in ("soft", "sharp"):
+        vals = [r["beatDeviationMs"] for r in rows if r["label"] == label]
+        if not vals:
+            continue
+        print("  %-8s %5d %11.1f мс %11.1f мс"
+              % (label, len(vals), statistics.median([abs(v) for v in vals]),
+                 statistics.stdev(vals) if len(vals) > 1 else 0.0))
+    print("  Медиана модуля отклонения и СКО; постоянная задержка звука сдвигает обе")
+    print("  градации одинаково и на сравнение между ними не влияет (PLAN §7.4).")
+    print("  Считается по полной сетке долей из сессии, а не по полю beatDeviationMs.")
 
 
 def margin_report(rows, key, title):
@@ -182,6 +348,13 @@ def main(argv=None):
     ap.add_argument("--window", type=int, default=50,
                     help="окно признаков с окном, мс после DOWN (по умолчанию 50)")
     ap.add_argument("--holdout", help="считать только этот расклад, а не все по очереди")
+    ap.add_argument("--soft-quantile", type=float, default=1.0,
+                    help="квантиль по мягким обучающим для порога: 1.0 — максимум"
+                         " (правило SF, по умолчанию), 0.95 — отдать верхний выброс")
+    ap.add_argument("--thresholds",
+                    help="применить готовые пороги без обучения, например"
+                         " \"area50=2336.369,shift50=0\" — так проверяется правило,"
+                         " зафиксированное до съёмки (docs/protocol.md)")
     args = ap.parse_args(argv)
 
     loaded = []
@@ -195,8 +368,9 @@ def main(argv=None):
             continue
         loaded.append((os.path.basename(path), session))
 
-    if len(loaded) < 2:
+    if len(loaded) < 2 and not args.thresholds:
         print("нужны минимум две серии: обучение и проверка должны быть разведены")
+        print("(с готовыми порогами — ключ --thresholds — хватает и одной)")
         return 2
 
     # Разные протоколы, участники и устройства в одном расчёте не смешиваются —
@@ -226,6 +400,12 @@ def main(argv=None):
         print("размеченных контактов нет: нужны серии площадного протокола")
         return 2
 
+    beat_report(rows)
+
+    if args.thresholds:
+        frozen_check(rows, parse_thresholds(args.thresholds, args.window), args.window)
+        return 0
+
     head("запас прочности признаков (все серии вместе)")
     margin_report(everything, "shift", "микросдвиг за контакт, px")
     margin_report(everything, "shiftW", "микросдвиг за первые %d мс, px" % args.window)
@@ -233,8 +413,14 @@ def main(argv=None):
     names = [n for n, _ in loaded]
     holdouts = [os.path.basename(args.holdout)] if args.holdout else names
     head("отсев резких по наборам признаков (обучение — остальные серии)")
-    print("  порог: максимум признака по мягким обучающим; мягким считается контакт,")
-    print("  который ниже порога по всем признакам набора")
+    if args.soft_quantile >= 1.0:
+        print("  порог: максимум признака по мягким обучающим; мягким считается контакт,")
+        print("  который ниже порога по всем признакам набора")
+    else:
+        print("  порог: %.2f-квантиль признака по мягким обучающим (не максимум —"
+              % args.soft_quantile)
+        print("  часть мягких отдаётся сознательно); мягким считается контакт, который")
+        print("  ниже порога по всем признакам набора")
     print()
     print("  %-38s %-18s %s" % ("набор признаков", "мягких прошло", "резких отсеяно"))
     for title, keys in FEATURE_SETS:
@@ -246,7 +432,7 @@ def main(argv=None):
                 print("  [!] отложенная серия %s не найдена" % hold)
                 return 2
             train = [r for n, rs in rows.items() if n != hold for r in rs]
-            res = evaluate(train, rows[hold], keys)
+            res = evaluate(train, rows[hold], keys, args.soft_quantile)
             per_hold.append(res)
             soft_sum += res["soft_passed"]; soft_n += res["soft_total"]
             sharp_sum += res["sharp_rejected"]; sharp_n += res["sharp_total"]
@@ -263,7 +449,7 @@ def main(argv=None):
         shown = []
         for res in per_hold:
             shown.append(", ".join(
-                "%s ≤ %.3f" % (k.replace("W", str(args.window)), v)
+                "%s ≤ %.6f" % (k.replace("W", str(args.window)), v)
                 for k, v in res["thr"].items() if v is not None))
         for i, line in enumerate(shown):
             print("  %-38s пороги%s: %s"

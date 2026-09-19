@@ -17,6 +17,8 @@
   h1 { font-size: 17px; margin: 0 0 8px; }
   h1 a { color: #6fa8ff; text-decoration: none; font-weight: normal; font-size: 14px; margin-left: 8px; }
   .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  /* display у .row перебивает браузерное [hidden], иначе выбор темпа не прячется */
+  .row[hidden] { display: none; }
   button, select {
     flex: 1 1 auto; min-width: 86px; font-size: 15px; padding: 11px 12px;
     background: #273041; color: #e8ecf1; border: 1px solid #39465c; border-radius: 10px;
@@ -63,8 +65,17 @@
     <option value="area-extremes">площадь: 40 тапов, крайности</option>
     <option value="area-press">площадь: 20 тапов, прижим против кончика</option>
     <option value="area-natural">площадь: 60 тапов, естественно, одной частью пальца</option>
+    <option value="area-metronome">площадь: 60 тапов под метроном</option>
     <option value="control-touch">контроль: 20 тапов, только Touch</option>
     <option value="control-pointer">контроль: 20 тапов, только Pointer</option>
+  </select>
+</div>
+<div class="row" id="bpmRow" hidden>
+  <select id="bpm">
+    <option value="30">метроном 30 BPM — 2000 мс на тап</option>
+    <option value="60">метроном 60 BPM — 1000 мс на тап</option>
+    <option value="100">метроном 100 BPM — 600 мс на тап</option>
+    <option value="150" selected>метроном 150 BPM — 400 мс на тап</option>
   </select>
 </div>
 <p class="hint" id="protoHint"></p>
@@ -137,6 +148,14 @@
       taps: 60, mode: 'both', bpm: 0, blocks: 10, recordMove: true,
       hint: 'Блоки по 10. Касайся одним и тем же местом пальца, как удобно, и не меняй его между блоками; мягко — тихо и легко, резко — быстро и сильно.'
     },
+    // Площадь под метроном. Свободный темп — лабораторное условие: игрок бьёт по
+    // сетке, и на быстрой сетке жест меняется (на мягкий тап просто нет времени).
+    // Темп выбирается на странице, крайние положения 30 и 150 BPM; правило
+    // фильтра к этим сериям применяется уже зафиксированное, без переобучения.
+    'area-metronome': {
+      taps: 60, mode: 'both', bpm: 'select', blocks: 10, recordMove: true,
+      hint: 'Блоки по 10, тап в каждый щелчок. Часть пальца одна и та же; мягко — тихо и легко, резко — быстро и сильно. Звук с динамика: переключатель «Бесшумно» выключен.'
+    },
     'control-touch': {
       taps: 20, mode: 'touch', bpm: 0, blocks: null, recordMove: false,
       hint: 'Контрольная: только Touch Events. Нужна, потому что второй поток искажает первый.'
@@ -180,7 +199,7 @@
       Log.warn('среда: ' + kind);
     }
   })();
-  var rec = null, metro = null, proto = null, protoName = null;
+  var rec = null, metro = null, proto = null, protoName = null, bpm = 0;
   var taps = 0, cancels = 0, startGrade = 'soft';
   var awaitingLastUp = false, lastUpTimer = null;
 
@@ -229,7 +248,7 @@
     } else {
       zone.className = 'plain';
       zoneTitle.textContent = String(left);
-      zoneSub.textContent = proto.bpm ? 'тапай в щелчок' : 'тапай в своём темпе';
+      zoneSub.textContent = bpm ? 'тапай в щелчок' : 'тапай в своём темпе';
       rec.setLabel(null);
     }
   }
@@ -279,10 +298,17 @@
     Log.warn('выгрузи серию сейчас: повторить её в тех же условиях нельзя');
   }
 
+  function syncBpmRow() {
+    var selected = PROTOCOLS[selProto.value];
+    document.getElementById('bpmRow').hidden = (selected.bpm !== 'select');
+  }
+
   selProto.addEventListener('change', function () {
     hint.textContent = PROTOCOLS[selProto.value].hint;
+    syncBpmRow();
   });
   hint.textContent = PROTOCOLS[selProto.value].hint;
+  syncBpmRow();
 
   btnStart.addEventListener('click', function () {
     protoName = selProto.value;
@@ -292,7 +318,12 @@
     var seriesNum = parseInt(meta().series, 10);
     startGrade = (isFinite(seriesNum) && seriesNum % 2 === 0) ? 'sharp' : 'soft';
 
-    metro = proto.bpm ? new Clock.Metronome({ bpm: proto.bpm }) : null;
+    // Темп: фиксированный у тайминговых протоколов, выбранный на странице —
+    // у площадных под метроном. В метаданные уходит уже число (см. «Выгрузить»).
+    bpm = (proto.bpm === 'select')
+      ? parseInt(document.getElementById('bpm').value, 10)
+      : proto.bpm;
+    metro = bpm ? new Clock.Metronome({ bpm: bpm }) : null;
     rec = new Recorder({
       element: zone, mode: proto.mode, frames: frames,
       recordMove: proto.recordMove, preventDefault: false,
@@ -311,11 +342,12 @@
 
     if (metro) {
       metro.start().then(function (m) {
-        Log.ok('метроном ' + proto.bpm + ' BPM, перевод шкал: ' + m.method);
+        Log.ok('метроном ' + bpm + ' BPM, перевод шкал: ' + m.method);
         if (m.method !== 'getOutputTimestamp') Log.warn('getOutputTimestamp недоступен — точность перевода хуже');
       }).catch(function (e) { Log.err('метроном не стартовал: ' + e.message); });
     }
     Log.ok('старт: ' + protoName + ', ' + proto.taps + ' тапов, режим ' + proto.mode +
+           (bpm ? ', метроном ' + bpm + ' BPM' : '') +
            (proto.blocks ? ', первый блок ' + startGrade : ''));
   });
 
@@ -331,7 +363,7 @@
     m.actualTaps = taps;
     m.blockSize = proto.blocks;
     m.startGrade = proto.blocks ? startGrade : null;
-    m.bpm = proto.bpm || null;
+    m.bpm = bpm || null;
     m.env = environment;
     var session = rec.session(m, {
       calibration: calib,
