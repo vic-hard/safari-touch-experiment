@@ -39,6 +39,7 @@ import argparse
 import bisect
 import math
 import os
+import random
 import statistics
 import sys
 
@@ -138,6 +139,8 @@ def contact_rows(session, source, window_ms):
         if label not in ("soft", "sharp"):
             continue
         down = c["events"][0]
+        up = c["events"][-1]
+        t0, t1 = down.get("timeStamp"), up.get("timeStamp")
         rows.append({
             "label": label,
             "tapIndex": c.get("tapIndex"),
@@ -146,6 +149,11 @@ def contact_rows(session, source, window_ms):
             "areaW": area_of(c, source, window_ms),
             "shift": shift_of(c),
             "shiftW": shift_of(c, window_ms),
+            # Длительность в наборы признаков не входит: она известна только на
+            # отпускании, то есть на 60–200 мс позже, чем игре нужен ответ.
+            # Считается ради проверки разделимости — чтобы видеть, не разделял
+            # ли участник градации тем, чего фильтр не видит.
+            "dur": (t1 - t0) if all(isinstance(v, (int, float)) for v in (t0, t1)) else None,
         })
     return rows
 
@@ -293,6 +301,89 @@ def frozen_check(rows_by_name, thr, window_ms):
         print("      единичные потери допускает — сверься с критерием в docs/protocol.md.")
 
 
+def auc(sharp, soft):
+    """Доля пар «резкий, мягкий», где у резкого признак больше; совпадения — половина.
+
+    0.5 означает, что признак и градация не связаны никак. Величина не зависит
+    ни от порога, ни от того, сколько ступеней занял канал, поэтому ею и
+    проверяется главная предпосылка всего фильтра: что разделять вообще есть чем.
+    """
+    if not sharp or not soft:
+        return None
+    hits = 0.0
+    for a in sharp:
+        for b in soft:
+            hits += 1.0 if a > b else (0.5 if a == b else 0.0)
+    return hits / (len(sharp) * len(soft))
+
+
+def auc_p_value(values, labels, observed, iters=1500):
+    """Перестановочный тест: как часто случайная разметка даёт такое же AUC.
+
+    Аналитической формулы для квантованного канала с массой совпадений нет, а
+    перестановки её не требуют. Порядок перестановок фиксирован семенем, чтобы
+    число в отчёте воспроизводилось.
+    """
+    if observed is None:
+        return None
+    rng = random.Random(20260922)
+    pool = list(values)
+    extreme = 0
+    for _ in range(iters):
+        rng.shuffle(pool)
+        sharp = [v for v, lab in zip(pool, labels) if lab == "sharp"]
+        soft = [v for v, lab in zip(pool, labels) if lab == "soft"]
+        a = auc(sharp, soft)
+        if a is not None and abs(a - 0.5) >= abs(observed - 0.5):
+            extreme += 1
+    return (extreme + 1.0) / (iters + 1.0)
+
+
+def separability_report(rows_by_name, window_ms):
+    """Есть ли в канале что разделять — до всякого порога.
+
+    Порог, подобранный на данных, где градации неразличимы, выглядит как
+    работающий: мягкие сохраняются все, отсев близок к нулю, ни одно правило не
+    нарушено. Отличить этот случай от рабочего можно только так — мерой, которая
+    от порога не зависит. У участников, снятых 21.09.2026, ровно это и вышло:
+    AUC 0.47–0.62 при 0.93–0.99 у тех, кто калибровался.
+    """
+    rows = [r for rs in rows_by_name.values() for r in rs]
+    head("разделимость градаций в канале (до выбора порога)")
+    print("  AUC — доля пар «резкий, мягкий», где у резкого признак больше. 0.5 —")
+    print("  связи нет; p — перестановочный тест, 1500 перестановок, семя фиксировано.")
+    print()
+    print("  %-28s %5s %8s %8s" % ("признак", "n", "AUC", "p"))
+    verdicts = []
+    for key, title in (("areaW", "площадь за %d мс" % window_ms),
+                       ("shiftW", "микросдвиг за %d мс" % window_ms),
+                       ("dur", "длительность контакта")):
+        vals = [r[key] for r in rows if r[key] is not None]
+        labels = [r["label"] for r in rows if r[key] is not None]
+        if len(set(vals)) < 2:
+            print("  %-28s %5d %8s %8s" % (title, len(vals), "—", "—"))
+            print("      канал на этих сериях константа — разделять нечем")
+            verdicts.append(False)
+            continue
+        a = auc([v for v, lab in zip(vals, labels) if lab == "sharp"],
+                [v for v, lab in zip(vals, labels) if lab == "soft"])
+        pv = auc_p_value(vals, labels, a)
+        print("  %-28s %5d %8.2f %8.3f" % (title, len(vals), a, pv))
+        if key != "dur":
+            verdicts.append(pv is not None and pv < 0.05 and a > 0.5)
+        elif pv is not None and pv < 0.05:
+            note = "короче" if a < 0.5 else "длиннее"
+            print("      градации различаются длительностью (у резких контакт %s)." % note)
+            print("      В набор признаков она не входит: известна только на отпускании.")
+    if not any(verdicts):
+        print()
+        print("  [!] ни один признак фильтра градации не различает. Порог, снятый с таких")
+        print("      данных, пройдёт по всем правилам и при этом не будет отсеивать ничего:")
+        print("      сохранится 100% мягких и около 0% резких. Это не настройка порога,")
+        print("      а отсутствующий сигнал — сначала разбираться с жестом и инструкцией")
+        print("      (docs/protocol.md, «Проверка разделимости»), а не с порогом.")
+
+
 def beat_report(rows_by_name):
     """Попадание по щелчку метронома по градациям.
 
@@ -401,6 +492,7 @@ def main(argv=None):
         return 2
 
     beat_report(rows)
+    separability_report(rows, args.window)
 
     if args.thresholds:
         frozen_check(rows, parse_thresholds(args.thresholds, args.window), args.window)

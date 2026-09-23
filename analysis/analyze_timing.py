@@ -188,6 +188,11 @@ def frames_sanity(session, period):
 
 # --- A4 --------------------------------------------------------------------
 
+# Во сколько раз самый длинный интервал между move внутри контакта может
+# превышать самый короткий, чтобы каденс ещё считался ровным.
+GRID_SPREAD_MAX = 1.3
+
+
 def offsets_from_frames(frames, times):
     """Смещение метки от ближайшей предыдущей границы кадра.
 
@@ -268,13 +273,18 @@ def a4_frame_offsets(session, period):
             print("  %-12s %s" % ("", fmt_rayleigh(ra)))
             print(hist(offs, 0.0, period * 2, 20))
 
+    a4_move_grid_control(session)
+
     print()
     verdict_now = _a4_verdict(result["now"], "nowMs")
     print()
     verdict_ts = _a4_verdict(result["ts"], "timeStamp")
     print()
     if verdict_now == "both" and verdict_ts == "both":
-        print("  ИТОГ: полоса на обеих шкалах — DOWN действительно привязан к кадрам.")
+        print("  ИТОГ: полоса на обеих шкалах — DOWN привязан к сетке ввода.")
+        print("  Шаг сетки берётся из контроля по move выше, а не из журнала")
+        print("  кадров: журнал даёт период панели в покое, а рядом с тапом")
+        print("  частота обновления меняется.")
     elif verdict_now == "both" and verdict_ts == "down-free":
         print("  ИТОГ: по входу в обработчик полоса у всего, по собственной метке")
         print("  события — нет. По кадрам разнесена ДОСТАВКА события, а сам момент")
@@ -284,6 +294,99 @@ def a4_frame_offsets(session, period):
     else:
         print("  ИТОГ: метод не даёт состоятельного ответа — см. замечания выше.")
     return result
+
+
+def a4_move_grid_control(session):
+    """Контроль A4 без опоры на журнал кадров.
+
+    Смещение от метки rAF меряет DOWN относительно чужой сетки, и когда сетка
+    неровная, ответ портится механически: если панель на время касания уходит
+    на 120 Гц, интервал между кадрами рядом с тапом вдвое короче, смещение
+    физически не может выйти за него, и получается «полоса», которой в событии
+    нет. На iPhone 16 Pro Max тот же перекос в другую сторону: рядом с тапом
+    кадр пропускается, интервал вдвое длиннее.
+
+    Поэтому сетка берётся из самого контакта — из интервалов между move внутри
+    него. Вопроса тут два, и порядок важен:
+
+    1. Есть ли вообще жёсткая сетка ввода? Если интервалы между move внутри
+       контакта гуляют, то сетки нет, и квантоваться DOWN не по чему. Так на
+       обоих iPhone и на одном из двух Android-телефонов.
+    2. Если сетка есть — лежит ли DOWN на ней? Проверяется фаза задержки до
+       первого move: у привязанного DOWN она равна целому числу шагов.
+
+    Без первого вопроса второй даёт ложную полосу: на неровном каденсе
+    остаток от деления на «период» — это шум, который на короткой серии
+    случайно собирается в полосу.
+    """
+    print()
+    print("  --- контроль без журнала кадров: сетка ввода из потока move ---")
+    for source, down_typ, move_typ in (("pointer", "pointerdown", "pointermove"),
+                                       ("touch", "touchstart", "touchmove")):
+        by_tap = {}
+        for e in session.get("events", []):
+            if e.get("source") != source or e.get("type") not in (down_typ, move_typ):
+                continue
+            if e.get("tapIndex") is None:
+                continue  # без номера тапа контакты не разделить
+            by_tap.setdefault(e["tapIndex"], []).append(e)
+
+        spreads = []      # разброс интервалов между move внутри контакта
+        even = []         # контакты с ровным каденсом: (период, задержка до первого move)
+        usable = []       # из них те, где первый move пришёл в пределах пары шагов
+        for _, evs in sorted(by_tap.items()):
+            evs.sort(key=lambda e: e.get("seq") or 0)
+            down = next((e for e in evs if e.get("type") == down_typ), None)
+            moves = [e for e in evs if e.get("type") == move_typ]
+            if down is None or len(moves) < 3:
+                continue
+            ivs = [b["timeStamp"] - a["timeStamp"] for a, b in zip(moves, moves[1:])
+                   if isinstance(a.get("timeStamp"), (int, float))
+                   and isinstance(b.get("timeStamp"), (int, float))
+                   and b["timeStamp"] > a["timeStamp"]]
+            if len(ivs) < 2:
+                continue
+            per = statistics.median(ivs)
+            if not (5.0 <= per <= 25.0):
+                continue
+            spreads.append(max(ivs) / min(ivs))
+            if max(ivs) / min(ivs) > GRID_SPREAD_MAX:
+                continue
+            lag = moves[0]["timeStamp"] - down["timeStamp"]
+            even.append((per, lag))
+            if 0 < lag <= 2.5 * per:
+                usable.append((per, (lag % per) / per))
+
+        if len(spreads) < 5:
+            print("  %-8s контактов с тремя и более move мало (%d) — контроль не считается"
+                  % (source, len(spreads)))
+            continue
+        print("  %-8s контактов %d, ровный каденс у %d (%.0f%%), разброс интервалов медиана ×%.2f"
+              % (source, len(spreads), len(even),
+                 100 * len(even) / float(len(spreads)), statistics.median(spreads)))
+        if len(even) < 5:
+            print("  %-8s ЖЁСТКОЙ СЕТКИ ВВОДА НЕТ: интервалы между move гуляют, значит" % "")
+            print("  %-8s квантоваться DOWN не по чему. Вопрос о привязке не ставится." % "")
+            continue
+        if len(usable) < 5:
+            print("  %-8s сетка есть, но первый move приходит позже пары шагов у почти всех" % "")
+            print("  %-8s контактов (годных %d) — фазу измерить не на чем." % ("", len(usable)))
+            continue
+        ra = rayleigh([ph for _, ph in usable], 1.0)
+        step = statistics.median(per for per, _ in usable)
+        # Фаза безразмерная, поэтому ширина полосы переводится в мс шагом сетки.
+        width = ("~%.2f мс" % (ra["bandWidthMs"] * step)) if ra and ra["bandWidthMs"] else "—"
+        print("  %-8s шаг сетки %.2f мс, фаза DOWN: R=%.3f  p=%.2g  ширина %s  ->  %s"
+              % ("", step, ra["R"], ra["p"], width,
+                 "полоса" if is_band(ra) else "равномерно"))
+        if is_band(ra):
+            print("  %-8s DOWN лежит на сетке: момент касания известен не точнее %.2f мс,"
+                  % ("", step))
+            print("  %-8s вклад квантования %.2f мс (шаг/sqrt(12))"
+                  % ("", step / math.sqrt(12)))
+        else:
+            print("  %-8s сетка есть, но DOWN на ней не лежит — разрешение лучше её шага"
+                  % "")
 
 
 # --- контакты: пары DOWN→UP ------------------------------------------------
