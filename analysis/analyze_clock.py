@@ -28,12 +28,16 @@ from collections import defaultdict
 
 # --- общие мелочи (в каждом скрипте свои: общего модуля в структуре нет) ----
 
+KNOWN_FORMATS = ("web-probe-0.1.0", "web-probe-0.2.0")
+
+
 def load(path):
     with open(path, "r", encoding="utf-8") as fh:
         session = json.load(fh)
     fmt = session.get("format")
-    if fmt != "web-probe-0.1.0":
-        print("  [!] формат %r, ожидался web-probe-0.1.0 — читаю как есть" % fmt)
+    if fmt not in KNOWN_FORMATS:
+        print("  [!] формат %r, известные: %s — читаю как есть"
+              % (fmt, ", ".join(KNOWN_FORMATS)))
     return session
 
 

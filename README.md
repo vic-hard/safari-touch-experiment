@@ -109,6 +109,8 @@ HTTPS снимает класс вопросов «почему тут не ра
 python analysis/analyze_clock.py  data/<session>.json          # A2, A3
 python analysis/analyze_timing.py data/<session>.json          # A4-A8
 python analysis/analyze_area.py   data/s1.json data/s2.json data/s3.json   # A1, A10
+python analysis/analyze_features.py data/s1.json data/s2.json              # признаки, разделимость
+python analysis/analyze_motion.py data/<accel-probe>.json                  # M1-M5, акселерометр
 ```
 
 У каждого скрипта есть `--csv <файл>` для выгрузки подробностей. `analyze_area.py` по

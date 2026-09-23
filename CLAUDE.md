@@ -34,6 +34,7 @@ web/probe.html         Э1: какие поля живые
 web/timing.html        Э2: метки, кадры, метроном
 web/collect.html       Э3: серия по протоколу
 web/js/clock.js        калибровка часов, границы кадров
+web/js/motion.js       акселерометр и гироскоп (протокол accel-probe)
 web/js/recorder.js     единая запись событий обоих потоков
 web/js/export.js       POST на сервер + скачивание файлом
 web/js/log.js          лог на экране вместо Web Inspector
@@ -41,6 +42,8 @@ data/                  выгруженные сессии, один JSON на �
 analysis/analyze_clock.py    A2, A3
 analysis/analyze_timing.py   A4, A5, A6, A7, A8
 analysis/analyze_area.py     A1, A10
+analysis/analyze_features.py микросдвиг, наборы признаков, разделимость
+analysis/analyze_motion.py   M1–M6, проба канала акселерометра
 docs/protocol.md       протокол съёмки, заполняется после Э1
 docs/findings.md       критерии A1–A10 → фактические числа
 ```

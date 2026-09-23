@@ -21,6 +21,7 @@
     this.mode = opts.mode || 'both';            // both | touch | pointer
     this.frames = opts.frames || null;          // Clock.Frames
     this.metronome = opts.metronome || null;    // Clock.Metronome
+    this.motion = opts.motion || null;          // Motion, поток акселерометра
     this.recordMove = opts.recordMove !== false; // move нужен как контроль метода
     this.recordOverOut = !!opts.recordOverOut;
     this.preventDefault = !!opts.preventDefault;
@@ -320,14 +321,20 @@
     m.framePeriodMs = this.frames ? this.frames.periodMs() : null;
     // Простои кадров: при них привязка к кадру недостоверна (A4).
     m.frameStalls = this.frames ? (this.frames.stalls || 0) : null;
+    // Канал акселерометра: пишется не во всех протоколах, поэтому отсутствие
+    // разрешения и отсутствие самого запроса - разные вещи (null против false).
+    m.motionGranted = this.motion ? this.motion.granted : null;
+    m.motionSamples = this.motion ? this.motion.samples.length : null;
+    m.motionRateHz = this.motion ? this.motion.rateHz() : null;
 
     return {
-      format: 'web-probe-0.1.0',
+      format: 'web-probe-0.2.0',
       meta: m,
       clock: clock || null,
       frames: this.frames ? this.frames.times : [],
       events: this.events,
-      metronome: this.metronome ? this.metronome.dump() : null
+      metronome: this.metronome ? this.metronome.dump() : null,
+      motion: this.motion ? this.motion.dump() : null
     };
   };
 

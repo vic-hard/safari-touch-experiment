@@ -29,12 +29,15 @@ FRAME_60HZ_MS = 1000.0 / 60.0
 
 # --- общие мелочи ----------------------------------------------------------
 
+KNOWN_FORMATS = ("web-probe-0.1.0", "web-probe-0.2.0")
+
+
 def load(path):
     with open(path, "r", encoding="utf-8") as fh:
         session = json.load(fh)
-    if session.get("format") != "web-probe-0.1.0":
-        print("  [!] формат %r, ожидался web-probe-0.1.0 — читаю как есть"
-              % session.get("format"))
+    if session.get("format") not in KNOWN_FORMATS:
+        print("  [!] формат %r, известные: %s — читаю как есть"
+              % (session.get("format"), ", ".join(KNOWN_FORMATS)))
     return session
 
 

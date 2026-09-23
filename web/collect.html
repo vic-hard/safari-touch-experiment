@@ -66,6 +66,8 @@
     <option value="area-press">площадь: 20 тапов, прижим против кончика</option>
     <option value="area-natural">площадь: 60 тапов, естественно, одной частью пальца</option>
     <option value="area-metronome">площадь: 60 тапов под метроном</option>
+    <option value="accel-probe">акселерометр: 40 тапов, проба канала</option>
+    <option value="accel-alternating">акселерометр: 40 тапов, чередование по одному</option>
     <option value="control-touch">контроль: 20 тапов, только Touch</option>
     <option value="control-pointer">контроль: 20 тапов, только Pointer</option>
   </select>
@@ -92,6 +94,7 @@
 
 <script src="js/log.js"></script>
 <script src="js/clock.js"></script>
+<script src="js/motion.js"></script>
 <script src="js/recorder.js"></script>
 <script src="js/export.js"></script>
 <script>
@@ -156,6 +159,14 @@
       taps: 60, mode: 'both', bpm: 'select', blocks: 10, recordMove: true,
       hint: 'Блоки по 10, тап в каждый щелчок. Часть пальца одна и та же; мягко — тихо и легко, резко — быстро и сильно. Звук с динамика: переключатель «Бесшумно» выключен.'
     },
+    'accel-probe': {
+      taps: 40, mode: 'both', bpm: 0, blocks: 10, recordMove: true, motion: true,
+      hint: 'Блоки по 10. Касайся одним и тем же местом пальца, как удобно; мягко — тихо и легко, резко — быстро и сильно. Первую серию сними с телефоном в руке, вторую — положив его на стол.'
+    },
+    'accel-alternating': {
+      taps: 40, mode: 'both', bpm: 0, blocks: 1, recordMove: true, motion: true,
+      hint: 'Чередуй КАЖДЫЙ тап: мягко — резко — мягко, следи за рамкой. Часть пальца одна и та же; мягко — тихо и легко, резко — быстро и сильно. Телефон в руке.'
+    },
     'control-touch': {
       taps: 20, mode: 'touch', bpm: 0, blocks: null, recordMove: false,
       hint: 'Контрольная: только Touch Events. Нужна, потому что второй поток искажает первый.'
@@ -199,7 +210,7 @@
       Log.warn('среда: ' + kind);
     }
   })();
-  var rec = null, metro = null, proto = null, protoName = null, bpm = 0;
+  var rec = null, metro = null, proto = null, protoName = null, bpm = 0, motion = null;
   var taps = 0, cancels = 0, startGrade = 'soft';
   var awaitingLastUp = false, lastUpTimer = null;
 
@@ -289,6 +300,7 @@
     if (rec) rec.stop();
     frames.unwatch();
     if (metro) metro.stop();
+    if (motion) motion.stop();
     zone.className = 'done';
     zoneTitle.textContent = String(taps);
     zoneSub.textContent = reason + ' — жми «Выгрузить»';
@@ -311,6 +323,26 @@
   syncBpmRow();
 
   btnStart.addEventListener('click', function () {
+    var selected = PROTOCOLS[selProto.value];
+    if (!selected.motion) { beginSeries(null); return; }
+    btnStart.disabled = true;
+    Motion.request().then(function (res) {
+      var m = new Motion();
+      m.granted = res.granted;
+      m.permissionReason = res.reason;
+      if (res.granted) {
+        m.start();
+        Log.ok('датчики движения: разрешены (' + res.reason + ')');
+      } else {
+        Log.err('датчики движения: НЕТ (' + res.reason + ') — серия пойдёт без'
+                + ' канала ускорения, в записи он будет пустым');
+      }
+      beginSeries(m);
+    });
+  });
+
+  function beginSeries(motionStream) {
+    motion = motionStream;
     protoName = selProto.value;
     proto = PROTOCOLS[protoName];
     taps = 0; cancels = 0; awaitingLastUp = false;
@@ -327,7 +359,7 @@
     rec = new Recorder({
       element: zone, mode: proto.mode, frames: frames,
       recordMove: proto.recordMove, preventDefault: false,
-      metronome: metro, onEvent: onEvent,
+      metronome: metro, motion: motion, onEvent: onEvent,
       onTapStart: onTapStart, onTapEnd: onTapEnd
     });
     frames.reset();
@@ -349,7 +381,7 @@
     Log.ok('старт: ' + protoName + ', ' + proto.taps + ' тапов, режим ' + proto.mode +
            (bpm ? ', метроном ' + bpm + ' BPM' : '') +
            (proto.blocks ? ', первый блок ' + startGrade : ''));
-  });
+  }
 
   btnAbort.addEventListener('click', function () { finish('серия прервана'); });
 
@@ -370,7 +402,12 @@
       granularityMs: calib.granularityMs,
       timeOrigin: calib.timeOrigin
     });
-    Log.line('выгрузка: ' + session.events.length + ' событий, ' + session.frames.length + ' кадров');
+    Log.line('выгрузка: ' + session.events.length + ' событий, ' + session.frames.length + ' кадров'
+             + (session.motion ? ', ' + session.motion.sampleCount + ' отсчётов датчика ('
+                + session.motion.rateHz + ' Гц)' : ''));
+    if (session.motion && session.motion.granted && session.motion.sampleCount === 0) {
+      Log.err('разрешение дано, а отсчётов нет ни одного: канал молчит — серия для пробы негодная');
+    }
     Export.save(session).then(function (res) {
       btnExport.disabled = false;
       if (res.server) Log.ok('серия на ноутбуке: ' + res.server.file);
