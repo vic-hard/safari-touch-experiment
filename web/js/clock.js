@@ -317,7 +317,21 @@
     }
   };
 
-  /** Старт только из жеста пользователя: iOS не даёт запустить звук иначе. */
+  /**
+   * Разблокировка звука — синхронно, прямо в обработчике жеста. Нужна, когда
+   * между жестом и стартом стоит промис: запрос разрешения на датчики движения
+   * показывает системный диалог, и к его ответу жест уже истёк — resume(),
+   * вызванный оттуда, iOS молча игнорирует, и метроном не звучит.
+   */
+  Metronome.prototype.unlock = function () {
+    var AC = global.AudioContext || global.webkitAudioContext;
+    if (!AC) return false;
+    if (!this.ctx) this.ctx = new AC();
+    this.ctx.resume();
+    return true;
+  };
+
+  /** Старт из жеста пользователя или после unlock(): иначе iOS звук не даст. */
   Metronome.prototype.start = function () {
     var AC = global.AudioContext || global.webkitAudioContext;
     if (!AC) return Promise.reject(new Error('нет Web Audio'));

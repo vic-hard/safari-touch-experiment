@@ -16,8 +16,9 @@
     M5  accel50: максимум модуля ускорения в первые 50 мс после DOWN
     M6  контроль метода: то же окно ДО касания и нормировка на фон тапа
 
-Считается отдельным скриптом и в общий анализатор не встраивается: пока не
-известно, отвечает ли канал вообще, признаку нечего делать в правиле фильтра.
+Проба считается отдельным скриптом. Признак для правила фильтра (этап 2) —
+`tap_features` в конце файла; его вызывает `analyze_features.py`, там же порог и
+наборы вместе с площадью и микросдвигом.
 
     python analysis/analyze_motion.py data/<серии accel-probe>.json
 
@@ -36,8 +37,9 @@ M6 — обязательный контроль, без него M5 не чит
 
 Нормировка на фон тапа (rise50) печатается, но вывод на ней не строится: при
 чередовании в базу мягкого тапа попадает хвост предыдущего резкого, знаменатель
-оказывается связан с градацией в обратную сторону, и контраст завышается. Какой
-знаменатель брать — вопрос этапа 2, вывод этапа 1 делается по сырому accel50.
+оказывается связан с градацией в обратную сторону, и контраст завышается. Вывод
+этапа 1 делается по сырому accel50; знаменатель для правила фильтра выбран на
+этапе 2 — фон игрока за 5 с до касания (BG_* ниже).
 
 Только стандартная библиотека.
 """
@@ -50,7 +52,10 @@ import statistics
 import sys
 
 import analyze_area as area_mod
-from analyze_features import auc, auc_p_value
+# Модулем, а не именами: analyze_features сам импортирует этот файл ради
+# признаков ускорения, и при взаимном импорте имён один из двух запусков
+# падал бы на недоопределённом модуле.
+import analyze_features as features_mod
 
 WINDOW_MS = 50          # то же окно, что у area50 и shift50
 CONTROL_WINDOW_MS = 100  # контроль: если в 50 мс отсчётов не хватает, видно здесь
@@ -171,6 +176,23 @@ def m1_channel(session):
 
 # --- M2 --------------------------------------------------------------------
 
+def delivery_lags(samples):
+    lags = []
+    for s in samples:
+        t, n = s.get("timeStamp"), s.get("nowMs")
+        if isinstance(t, (int, float)) and isinstance(n, (int, float)):
+            lags.append(n - t)
+    return lags
+
+
+def scale_of(samples):
+    """Тот же выбор шкалы, что в M2, но без печати — для правила фильтра."""
+    lags = delivery_lags(samples)
+    if not lags or abs(statistics.median(lags)) > 1000:
+        return "now"
+    return "timestamp"
+
+
 def m2_scale(session, samples):
     """По какой шкале резать окно и что на самом деле значит метка отсчёта.
 
@@ -186,11 +208,7 @@ def m2_scale(session, samples):
       * зазор в секунды и больше — другое начало отсчёта, шкала несравнима.
     """
     head("M2 — шкала меток: сопоставима ли со шкалой касаний")
-    lags = []
-    for s in samples:
-        t, n = s.get("timeStamp"), s.get("nowMs")
-        if isinstance(t, (int, float)) and isinstance(n, (int, float)):
-            lags.append(n - t)
+    lags = delivery_lags(samples)
     print("  motion, nowMs − timeStamp, мс: %s" % describe(lags))
 
     ev_lags = [e.get("handlerLagMs") for e in session.get("events", [])
@@ -398,10 +416,10 @@ def m5_feature(rows_by_name):
                 print("    %-10s %10s %10s %8s %8s %d из %d"
                       % (key, "—", "—", "—", "—", empty, len(rows)))
                 continue
-            a = auc(hv, sv)
+            a = features_mod.auc(hv, sv)
             vals = [r[key] for r in rows if r[key] is not None]
             labels = [r["label"] for r in rows if r[key] is not None]
-            pv = auc_p_value(vals, labels, a)
+            pv = features_mod.auc_p_value(vals, labels, a)
             print("    %-10s %10.3f %10.3f %8.2f %8.3f %d из %d"
                   % (key, statistics.median(sv), statistics.median(hv), a, pv, empty, len(rows)))
             if key == "accel50":
@@ -454,13 +472,13 @@ def m6_control(rows_by_name, metas):
             hv = [r[key] for r in rows if r["label"] == "sharp" and r[key] is not None]
             if not sv or not hv:
                 continue
-            a = auc(hv, sv)
+            a = features_mod.auc(hv, sv)
             vals = [r[key] for r in rows if r[key] is not None]
             labels = [r["label"] for r in rows if r[key] is not None]
             res[key] = a
             print("    %-10s %10.3f %10.3f %8.2f %8.3f"
                   % (key, statistics.median(sv), statistics.median(hv), a,
-                     auc_p_value(vals, labels, a)))
+                     features_mod.auc_p_value(vals, labels, a)))
         base_auc, rise, windup = res.get("base"), res.get("rise50"), res.get("windup")
         if base_auc is None or rise is None:
             continue
@@ -530,6 +548,90 @@ def verdict(verdicts):
         print("  КАНАЛ НЕ ГОДИТСЯ: лучшее AUC %.2f ниже %.2f. Этапы 2–4 не делаются."
               % (best_auc, AUC_MAYBE))
         print("  Это результат, а не неудача: отрицательный ответ стоил полдня вместо дня.")
+
+
+# --- этап 2: признак для правила фильтра -----------------------------------
+#
+# Фон игрока — знаменатель нормировки. Сырое accel50 зависит от хвата (на столе
+# все значения в 8 раз меньше) и от человека (медиана мягких у user6 выше самого
+# слабого резкого у user5), поэтому единым порогом на пяти сериях с ускорением
+# отсеивается 73 резких из 100, а после деления на фон — 96.
+#
+# Фон берётся по каждому тапу, но не из окна у самого тапа: такое окно
+# (base, −400…−200 мс) на чередовании оказалось связано с градацией в обратную
+# сторону — в него попадает хвост соседнего резкого, — а на 150 BPM его нет
+# вовсе. Здесь фон — нижний квартиль |a| за 5 с до касания, по ВСЕМ отсчётам,
+# тапы не вырезаются. Нижний квартиль переживает, даже если звоном ударов
+# занята половина отсчётов, поэтому пауз между тапами не требует и годится для
+# плотного чарта. Он причинный — игра знает его в момент касания. Последние
+# 100 мс не входят: там уже замах, у резких он завышен самим тапом.
+#
+# Параметры выбраны по пяти сериям 23–24.09.2026 из плато, а не по максимуму:
+# окно 2/5/10 с и квантиль 0.10/0.25/0.50 дают от 91 до 97 отсеянных из 100.
+BG_FROM_MS, BG_TO_MS = -5000, -100
+BG_QUANTILE = 0.25
+# Меньше секунды истории — фону верить нельзя, признак не считается (null). В
+# игре это первые тапы после старта.
+BG_MIN_SAMPLES = 20
+
+
+def window_max(index, baseline, t0, lo, hi):
+    """Максимум |a| в (t0 + lo, t0 + hi] и число отсчётов в окне."""
+    best, n = None, 0
+    for s in in_window(index, t0, lo, hi):
+        v = accel_magnitude(s, baseline)
+        if v is None:
+            continue
+        n += 1
+        if best is None or v > best:
+            best = v
+    return best, n
+
+
+def background(index, baseline, t0):
+    vals = [v for v in (accel_magnitude(s, baseline)
+                        for s in in_window(index, t0, BG_FROM_MS, BG_TO_MS))
+            if v is not None]
+    if len(vals) < BG_MIN_SAMPLES:
+        return None
+    return features_mod.quantile(vals, BG_QUANTILE)
+
+
+def tap_features(session, contacts, window_ms):
+    """Признаки ускорения по контактам, в порядке `contacts`; None — канала нет.
+
+        accel      максимум |a| в первые window_ms после DOWN, м/с²
+        accelbg    accel, делённый на фон игрока (см. BG_*)
+        windupbg   максимум |a| в −100…0 мс, делённый на фон: ответ, известный
+                   в самый момент касания, без ожидания окна
+        bg         сам фон, м/с²
+
+    Метка отсчёта `devicemotion` — время доставки, физический отсчёт раньше на
+    величину до периода потока (M2). Поправка не вносится: игра видит отсчёт в
+    тот же момент доставки, и окно, отмеренное по доставке, — ровно то, что ей
+    доступно. Сдвиг окна на −17 мс на пяти сериях ничего не дал (89 отсеянных
+    из 100 против 96).
+    """
+    _, samples = samples_of(session)
+    if not samples:
+        return None
+    scale = scale_of(samples)
+    index = time_index(samples, scale)
+    baseline = gravity_baseline(index[1])
+    out = []
+    for c in contacts:
+        t0 = event_time(c["events"][0], scale)
+        accel, n = window_max(index, baseline, t0, 0, window_ms)
+        windup, _ = window_max(index, baseline, t0, WINDUP_FROM_MS, WINDUP_TO_MS)
+        bg = background(index, baseline, t0) if isinstance(t0, (int, float)) else None
+        out.append({
+            "accel": accel,
+            "accel_n": n,
+            "bg": bg,
+            "accelbg": accel / bg if accel is not None and bg else None,
+            "windupbg": windup / bg if windup is not None and bg else None,
+        })
+    return out
 
 
 def main(argv=None):

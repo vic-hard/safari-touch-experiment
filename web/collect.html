@@ -160,11 +160,11 @@
       hint: 'Блоки по 10, тап в каждый щелчок. Часть пальца одна и та же; мягко — тихо и легко, резко — быстро и сильно. Звук с динамика: переключатель «Бесшумно» выключен.'
     },
     'accel-probe': {
-      taps: 40, mode: 'both', bpm: 0, blocks: 10, recordMove: true, motion: true,
+      taps: 40, mode: 'both', bpm: 0, blocks: 10, recordMove: true,
       hint: 'Блоки по 10. Касайся одним и тем же местом пальца, как удобно; мягко — тихо и легко, резко — быстро и сильно. Первую серию сними с телефоном в руке, вторую — положив его на стол.'
     },
     'accel-alternating': {
-      taps: 40, mode: 'both', bpm: 0, blocks: 1, recordMove: true, motion: true,
+      taps: 40, mode: 'both', bpm: 0, blocks: 1, recordMove: true,
       hint: 'Чередуй КАЖДЫЙ тап: мягко — резко — мягко, следи за рамкой. Часть пальца одна и та же; мягко — тихо и легко, резко — быстро и сильно. Телефон в руке.'
     },
     'control-touch': {
@@ -322,10 +322,20 @@
   hint.textContent = PROTOCOLS[selProto.value].hint;
   syncBpmRow();
 
+  /* Ускорение пишется во всех протоколах (этап 2 акселерометра): признак идёт
+     в правило фильтра рядом с площадью и микросдвигом, и его надо видеть на
+     тех же сериях — под метрономом, на площадных, на контрольных. Слушатель
+     висит на window, а не на зоне касаний, и потоки Touch/Pointer не трогает. */
   btnStart.addEventListener('click', function () {
-    var selected = PROTOCOLS[selProto.value];
-    if (!selected.motion) { beginSeries(null); return; }
     btnStart.disabled = true;
+    var selected = PROTOCOLS[selProto.value];
+    var tempo = (selected.bpm === 'select')
+      ? parseInt(document.getElementById('bpm').value, 10)
+      : selected.bpm;
+    // Звук разблокируется здесь, в самом жесте: после диалога разрешения на
+    // датчики жест уже истёк, и iOS не даст метроному зазвучать.
+    var metronome = tempo ? new Clock.Metronome({ bpm: tempo }) : null;
+    if (metronome && !metronome.unlock()) Log.err('нет Web Audio — метроном не зазвучит');
     Motion.request().then(function (res) {
       var m = new Motion();
       m.granted = res.granted;
@@ -337,11 +347,11 @@
         Log.err('датчики движения: НЕТ (' + res.reason + ') — серия пойдёт без'
                 + ' канала ускорения, в записи он будет пустым');
       }
-      beginSeries(m);
+      beginSeries(m, metronome, tempo);
     });
   });
 
-  function beginSeries(motionStream) {
+  function beginSeries(motionStream, metronome, tempo) {
     motion = motionStream;
     protoName = selProto.value;
     proto = PROTOCOLS[protoName];
@@ -352,10 +362,8 @@
 
     // Темп: фиксированный у тайминговых протоколов, выбранный на странице —
     // у площадных под метроном. В метаданные уходит уже число (см. «Выгрузить»).
-    bpm = (proto.bpm === 'select')
-      ? parseInt(document.getElementById('bpm').value, 10)
-      : proto.bpm;
-    metro = bpm ? new Clock.Metronome({ bpm: bpm }) : null;
+    bpm = tempo;
+    metro = metronome;
     rec = new Recorder({
       element: zone, mode: proto.mode, frames: frames,
       recordMove: proto.recordMove, preventDefault: false,
@@ -406,7 +414,7 @@
              + (session.motion ? ', ' + session.motion.sampleCount + ' отсчётов датчика ('
                 + session.motion.rateHz + ' Гц)' : ''));
     if (session.motion && session.motion.granted && session.motion.sampleCount === 0) {
-      Log.err('разрешение дано, а отсчётов нет ни одного: канал молчит — серия для пробы негодная');
+      Log.err('разрешение дано, а отсчётов нет ни одного: канал ускорения пуст — для правила фильтра серия неполная');
     }
     Export.save(session).then(function (res) {
       btnExport.disabled = false;

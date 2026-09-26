@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Признаки резкости тапа помимо площади: микросдвиг и комбинации.
+"""Признаки резкости тапа помимо площади: микросдвиг, ускорение и комбинации.
 
 Площадь пятна (SF §5, `analyze_area.py`) на естественном тапе одной частью
 пальца даёт мало: 56% отсева на iPhone 15 и 0% на iPhone 16 Pro Max. Здесь
@@ -12,6 +12,15 @@
     shift       максимальный сдвиг точки контакта от места касания, px
     shiftNN     то же, но видны только отсчёты первых NN мс после DOWN
     areaNN      максимум площади за первые NN мс после DOWN
+    accelNN     максимум модуля ускорения корпуса за первые NN мс, м/с²
+    accelbgNN   то же, делённое на фон игрока (нижний квартиль |a| за 5 с до
+                касания) — от хвата и от человека зависит меньше сырого
+    windupbg    замах: максимум |a| за 100 мс ДО касания к тому же фону —
+                ответ, известный в самый момент касания
+
+Ускорение считается в `analyze_motion.py` (там же разобрано, почему фон такой);
+у серий, снятых без канала ускорения, эти признаки пустые, и наборы с ними
+пропускаются.
 
 Окно нужно из-за задержки: полный сдвиг известен только на отпускании, а
 ритм-игре ответ нужен ближе к касанию, поэтому вариант с окном — не украшение,
@@ -37,6 +46,7 @@
 
 import argparse
 import bisect
+import itertools
 import math
 import os
 import random
@@ -44,6 +54,7 @@ import statistics
 import sys
 
 import analyze_area as area_mod
+import analyze_motion as motion_mod
 
 # Наборы признаков, которые имеет смысл сравнивать между собой. Порядок — от
 # одиночных к объединениям, чтобы в выводе было видно, что даёт объединение.
@@ -54,7 +65,16 @@ FEATURE_SETS = [
     ("микросдвиг в окне", ["shiftW"]),
     ("площадь ИЛИ микросдвиг в окне", ["area", "shiftW"]),
     ("площадь в окне ИЛИ микросдвиг в окне", ["areaW", "shiftW"]),
+    ("ускорение в окне", ["accelW"]),
+    ("ускорение к фону в окне", ["accelbgW"]),
+    ("замах к фону (в момент касания)", ["windupbg"]),
+    ("площадь в окне ИЛИ ускорение к фону", ["areaW", "accelbgW"]),
+    ("площадь, микросдвиг, ускорение к фону", ["areaW", "shiftW", "accelbgW"]),
 ]
+
+# Признаки канала ускорения: наборы с ними считаются, только если канал есть у
+# всех серий расчёта, иначе серия без канала потеряла бы все мягкие тапы.
+MOTION_KEYS = ("accelW", "accelbgW", "windupbg")
 
 
 def head(title):
@@ -133,11 +153,14 @@ def beat_deviation(ts, grid):
 
 def contact_rows(session, source, window_ms):
     grid = beat_grid(session)
+    contacts = area_mod.contacts(session, source)
+    motion = motion_mod.tap_features(session, contacts, window_ms)
     rows = []
-    for c in area_mod.contacts(session, source):
+    for i, c in enumerate(contacts):
         label = c.get("label")
         if label not in ("soft", "sharp"):
             continue
+        m = motion[i] if motion else {}
         down = c["events"][0]
         up = c["events"][-1]
         t0, t1 = down.get("timeStamp"), up.get("timeStamp")
@@ -154,6 +177,11 @@ def contact_rows(session, source, window_ms):
             # Считается ради проверки разделимости — чтобы видеть, не разделял
             # ли участник градации тем, чего фильтр не видит.
             "dur": (t1 - t0) if all(isinstance(v, (int, float)) for v in (t0, t1)) else None,
+            "accelW": m.get("accel"),
+            "accelbgW": m.get("accelbg"),
+            "windupbg": m.get("windupbg"),
+            "bg": m.get("bg"),
+            "hasMotion": motion is not None,
         })
     return rows
 
@@ -214,12 +242,35 @@ def evaluate(train, test, keys, soft_quantile=1.0):
     }
 
 
+# Признаки с окном: имя в пороге — основа плюс окно в мс (area50, accelbg50).
+WINDOWED = ("area", "shift", "accel", "accelbg")
+
+
+def key_name(key, window_ms):
+    """accelbgW → accelbg50: имя признака так, как оно пишется в пороге."""
+    return key[:-1] + str(window_ms) if key.endswith("W") else key
+
+
+def fmt_thr(value):
+    """Порог для печати: шесть знаков, округление только вверх.
+
+    Выписанный порог потом вставляют в --thresholds. Округлённый вниз, он
+    оказывается чуть ниже того мягкого тапа, по которому снят, и отсеивает его:
+    у непрерывного ускорения так теряется мягкий тап на каждом переносе порога.
+    """
+    text = "%.6f" % value
+    if float(text) < value:
+        text = "%.6f" % (float(text) + 1e-6)
+    return text
+
+
 def parse_thresholds(text, window_ms):
     """«area50=2336.369,shift50=0» → {'areaW': 2336.369, 'shiftW': 0.0}.
 
     Имена те же, что в docs/protocol.md: area, shift — по всему контакту,
-    areaNN, shiftNN — по окну NN мс. Окно в имени обязано совпасть с --window,
-    иначе правило считалось бы не то, которое зафиксировано.
+    areaNN, shiftNN, accelNN, accelbgNN — по окну NN мс, windupbg — замах, у
+    него окно своё. Окно в имени обязано совпасть с --window, иначе правило
+    считалось бы не то, которое зафиксировано.
     """
     out = {}
     for part in text.split(","):
@@ -232,10 +283,10 @@ def parse_thresholds(text, window_ms):
             value = float(value)
         except ValueError:
             raise SystemExit("порог %r не число" % part)
-        if name in ("area", "shift"):
+        if name in ("area", "shift", "windupbg"):
             out[name] = value
             continue
-        for base in ("area", "shift"):
+        for base in WINDOWED:
             if name.startswith(base) and name[len(base):].isdigit():
                 if int(name[len(base):]) != window_ms:
                     raise SystemExit(
@@ -244,14 +295,14 @@ def parse_thresholds(text, window_ms):
                 out[base + "W"] = value
                 break
         else:
-            raise SystemExit("непонятное имя порога %r (ожидалось area, shift,"
-                             " area<мс>, shift<мс>)" % name)
+            raise SystemExit("непонятное имя порога %r (ожидалось area, shift, windupbg,"
+                             " area<мс>, shift<мс>, accel<мс>, accelbg<мс>)" % name)
     if not out:
         raise SystemExit("--thresholds пуст")
     return out
 
 
-def warn_near_miss(rows_by_name, thr):
+def warn_near_miss(rows_by_name, thr, window_ms):
     """Порог, лежащий чуть ниже реального значения признака, — частая ошибка.
 
     Значения канала квантованы, и порог, выписанный с округлением вниз (5254.945
@@ -265,8 +316,8 @@ def warn_near_miss(rows_by_name, thr):
         near = [r[key] for r in rows
                 if isinstance(r.get(key), (int, float)) and 0 < r[key] - limit <= 0.01]
         if near:
-            print("  [!] порог %s = %.6f лежит на %.6f ниже значения %.6f, которое"
-                  % (key, limit, min(near) - limit, min(near)))
+            print("  [!] порог %s = %.6f лежит на %.2g ниже значения %.9f, которое"
+                  % (key_name(key, window_ms), limit, min(near) - limit, min(near)))
             print("      встречается в данных %d раз. Похоже на потерю точности при"
                   % len(near))
             print("      выписывании порога: проверь, не округлён ли он вниз.")
@@ -276,8 +327,8 @@ def frozen_check(rows_by_name, thr, window_ms):
     """Правило с заранее зафиксированными порогами: обучения нет вовсе."""
     head("проверка зафиксированным правилом (обучение не проводится)")
     print("  пороги: %s" % ", ".join(
-        "%s ≤ %.6f" % (k.replace("W", str(window_ms)), v) for k, v in sorted(thr.items())))
-    warn_near_miss(rows_by_name, thr)
+        "%s ≤ %s" % (key_name(k, window_ms), fmt_thr(v)) for k, v in sorted(thr.items())))
+    warn_near_miss(rows_by_name, thr, window_ms)
     print()
     print("  %-46s %-16s %s" % ("серия", "мягких прошло", "резких отсеяно"))
     soft_ok = soft_n = sharp_ok = sharp_n = 0
@@ -355,11 +406,27 @@ def separability_report(rows_by_name, window_ms):
     print()
     print("  %-28s %5s %8s %8s" % ("признак", "n", "AUC", "p"))
     verdicts = []
-    for key, title in (("areaW", "площадь за %d мс" % window_ms),
-                       ("shiftW", "микросдвиг за %d мс" % window_ms),
-                       ("dur", "длительность контакта")):
+    features = [("areaW", "площадь за %d мс" % window_ms),
+                ("shiftW", "микросдвиг за %d мс" % window_ms)]
+    if all(r["hasMotion"] for r in rows):
+        features += [("accelW", "ускорение за %d мс" % window_ms),
+                     ("accelbgW", "ускорение к фону за %d мс" % window_ms),
+                     ("windupbg", "замах к фону, -100…0 мс")]
+        no_bg = sum(1 for r in rows if r["accelW"] is not None and r["bg"] is None)
+        if no_bg:
+            print("  [!] у %d контактов из %d нет фона: меньше %d отсчётов за %d с до касания."
+                  % (no_bg, len(rows), motion_mod.BG_MIN_SAMPLES, -motion_mod.BG_FROM_MS // 1000))
+            print("      Ускорение к фону у них не считается, и фильтр отсеет их как резкие.")
+            print()
+    features.append(("dur", "длительность контакта"))
+    for key, title in features:
         vals = [r[key] for r in rows if r[key] is not None]
         labels = [r["label"] for r in rows if r[key] is not None]
+        if not vals:
+            print("  %-28s %5d %8s %8s" % (title, 0, "—", "—"))
+            print("      признак не измерен ни у одного контакта")
+            verdicts.append(False)
+            continue
         if len(set(vals)) < 2:
             print("  %-28s %5d %8s %8s" % (title, len(vals), "—", "—"))
             print("      канал на этих сериях константа — разделять нечем")
@@ -430,9 +497,85 @@ def margin_report(rows, key, title):
             print("        Один дрогнувший палец игрока — одно ложное срабатывание.")
 
 
+SINGLE_KEEP = 0.99   # доля мягких, которую единый порог обязан сохранить
+
+
+def single_threshold(rows, keys, keep=SINGLE_KEEP):
+    """Единый порог набора: наибольший отсев резких при ≥ keep мягких вместе.
+
+    Правило docs/protocol.md, «Единый порог для всех темпов», — теперь не вручную,
+    а перебором. Оптимальный порог по признаку всегда совпадает с каким-то
+    значением мягкого тапа (между ними отсев не меняется), а ниже своего
+    (1 − keep)-выброса признак не может опуститься, даже будь он в наборе один:
+    сам потеряет больше мягких, чем разрешено. Поэтому кандидатов по признаку —
+    единицы, и перебор их сочетаний точный, без жадного выбора по одному.
+    Из равных по отсеву берётся сохраняющий больше мягких.
+    """
+    soft = [r for r in rows if r["label"] == "soft"]
+    sharp = [r for r in rows if r["label"] == "sharp"]
+    if not soft or not sharp:
+        return None
+    need = math.ceil(keep * len(soft))
+    cands = []
+    for k in keys:
+        vals = sorted({r[k] for r in soft if r[k] is not None})
+        full = sorted(r[k] for r in soft if r[k] is not None)
+        if len(full) < need:
+            return None          # признак не измерен у слишком многих мягких
+        floor = full[need - 1]
+        cands.append([v for v in vals if v >= floor])
+    combos = 1
+    for c in cands:
+        combos *= len(c)
+    if combos > 200000:
+        raise SystemExit("единый порог: %d сочетаний кандидатов — слишком много" % combos)
+    best = None
+    for combo in itertools.product(*cands):
+        thr = dict(zip(keys, combo))
+        kept = sum(1 for r in soft if passes(r, thr))
+        if kept < need:
+            continue
+        rejected = sum(1 for r in sharp if not passes(r, thr))
+        score = (rejected, kept)
+        if best is None or score > best[0]:
+            best = (score, thr)
+    if best is None:
+        return None
+    return best[1]
+
+
+def single_report(rows_by_name, sets, window_ms):
+    """Единый порог на всех загруженных сериях вместе, с разбивкой по сериям."""
+    head("единый порог на все серии вместе (мягких сохранено ≥ %.0f%%)" % (100 * SINGLE_KEEP))
+    print("  Порог один на все загруженные серии — все темпы и режимы сразу, как в")
+    print("  продукте. Подобран на этих же данных: число обучающее, не подтверждённое.")
+    everything = [r for rs in rows_by_name.values() for r in rs]
+    for title, keys in sets:
+        thr = single_threshold(everything, keys)
+        print()
+        print("  %s" % title.replace("в окне", "за %d мс" % window_ms))
+        if thr is None:
+            print("    порога нет: признак не измерен у слишком многих мягких")
+            continue
+        print("    пороги: %s" % ", ".join("%s ≤ %s" % (key_name(k, window_ms), fmt_thr(v))
+                                         for k, v in thr.items()))
+        soft_ok = soft_n = sharp_ok = sharp_n = 0
+        for name, rows in rows_by_name.items():
+            soft = [r for r in rows if r["label"] == "soft"]
+            sharp = [r for r in rows if r["label"] == "sharp"]
+            sp = sum(1 for r in soft if passes(r, thr))
+            rj = sum(1 for r in sharp if not passes(r, thr))
+            soft_ok += sp; soft_n += len(soft); sharp_ok += rj; sharp_n += len(sharp)
+            print("    %-46s мягких %-9s резких отсеяно %s"
+                  % (name, "%d/%d" % (sp, len(soft)), "%d/%d" % (rj, len(sharp))))
+        print("    %-46s мягких %-9s резких отсеяно %s"
+              % ("ВСЕ ВМЕСТЕ", "%d/%d" % (soft_ok, soft_n),
+                 "%d/%d (%.0f%%)" % (sharp_ok, sharp_n, 100.0 * sharp_ok / sharp_n)))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="Признаки резкости тапа помимо площади: микросдвиг и комбинации")
+        description="Признаки резкости тапа помимо площади: микросдвиг, ускорение и комбинации")
     ap.add_argument("sessions", nargs="+", help="JSON сессии из data/, минимум две")
     ap.add_argument("--source", choices=["pointer", "touch"], default="pointer",
                     help="поток: pointer (по умолчанию — у Touch размер заморожен)")
@@ -491,11 +634,25 @@ def main(argv=None):
         print("размеченных контактов нет: нужны серии площадного протокола")
         return 2
 
+    no_motion = sorted(n for n, rs in rows.items() if rs and not rs[0]["hasMotion"])
+    sets = FEATURE_SETS
+    if no_motion:
+        sets = [(t, ks) for t, ks in FEATURE_SETS if not any(k in MOTION_KEYS for k in ks)]
+        print("  канала ускорения нет у %d серий из %d (сняты до этапа 2 или без"
+              % (len(no_motion), len(rows)))
+        print("  разрешения) — наборы с ускорением не считаются.")
+
     beat_report(rows)
     separability_report(rows, args.window)
 
     if args.thresholds:
-        frozen_check(rows, parse_thresholds(args.thresholds, args.window), args.window)
+        thr = parse_thresholds(args.thresholds, args.window)
+        if no_motion and any(k in MOTION_KEYS for k in thr):
+            print("  [!] в правиле есть порог по ускорению, а у серий %s канала нет:"
+                  % ", ".join(no_motion))
+            print("      их мягкие тапы отсеялись бы все. Считай их без порога по ускорению.")
+            return 2
+        frozen_check(rows, thr, args.window)
         return 0
 
     head("запас прочности признаков (все серии вместе)")
@@ -515,9 +672,7 @@ def main(argv=None):
         print("  ниже порога по всем признакам набора")
     print()
     print("  %-38s %-18s %s" % ("набор признаков", "мягких прошло", "резких отсеяно"))
-    for title, keys in FEATURE_SETS:
-        if args.window is None and any(k.endswith("W") for k in keys):
-            continue
+    for title, keys in sets:
         per_hold, soft_sum, soft_n, sharp_sum, sharp_n = [], 0, 0, 0, 0
         for hold in holdouts:
             if hold not in rows:
@@ -541,7 +696,7 @@ def main(argv=None):
         shown = []
         for res in per_hold:
             shown.append(", ".join(
-                "%s ≤ %.6f" % (k.replace("W", str(args.window)), v)
+                "%s ≤ %s" % (key_name(k, args.window), fmt_thr(v))
                 for k, v in res["thr"].items() if v is not None))
         for i, line in enumerate(shown):
             print("  %-38s пороги%s: %s"
@@ -549,6 +704,8 @@ def main(argv=None):
         if soft_n and soft_sum < soft_n:
             print("  %-38s из мягких потеряно %d — правило требует пропускать все"
                   % ("", soft_n - soft_sum))
+
+    single_report(rows, sets, args.window)
 
     print()
     print("  Эталон Android (SF §4): 60/60 мягких пропущено, 27/30 резких отсеяно.")
