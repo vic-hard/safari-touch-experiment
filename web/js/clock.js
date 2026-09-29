@@ -317,6 +317,47 @@
     }
   };
 
+  function logLine(kind, text) {
+    if (global.Log && global.Log[kind]) global.Log[kind](text);
+  }
+
+  /**
+   * Контекст создаётся один раз на серию, и перед ним сессия переводится в
+   * 'playback'. По умолчанию Web Audio в Safari идёт в категории «ambient» и
+   * глушится переключателем бесшумного режима (кнопка действия, пункт Пункта
+   * управления) — метроном молчит без единой ошибки, а данные пишутся так,
+   * будто он звучал. Audio Session API есть с Safari 17; если его нет, это
+   * пишется в лог и в запись.
+   */
+  Metronome.prototype._open = function () {
+    var AC = global.AudioContext || global.webkitAudioContext;
+    if (!AC) return false;
+    if (this.ctx) return true;
+    var session = global.navigator && global.navigator.audioSession;
+    if (session) {
+      try { session.type = 'playback'; } catch (e) { /* ниже видно по значению */ }
+      this.audioSessionType = session.type || null;
+    } else {
+      this.audioSessionType = null;
+    }
+    var self = this;
+    this.ctx = new AC();
+    this.stateLog = [{ state: this.ctx.state, perfTimeMs: r3(performance.now()) }];
+    this.ctx.addEventListener('statechange', function () {
+      var st = self.ctx ? self.ctx.state : 'closed';
+      self.stateLog.push({ state: st, perfTimeMs: r3(performance.now()) });
+      if (st === 'interrupted' || (st === 'suspended' && self.running)) {
+        logLine('err', 'звук метронома: AudioContext.state = ' + st + ' — щелчков не слышно,'
+                + ' серию прервать и переснять');
+      }
+    });
+    if (this.audioSessionType !== 'playback') {
+      logLine('warn', 'audioSession = ' + this.audioSessionType + ': метроном заглушит'
+              + ' бесшумный режим — проверь переключатель/кнопку действия');
+    }
+    return true;
+  };
+
   /**
    * Разблокировка звука — синхронно, прямо в обработчике жеста. Нужна, когда
    * между жестом и стартом стоит промис: запрос разрешения на датчики движения
@@ -324,20 +365,29 @@
    * вызванный оттуда, iOS молча игнорирует, и метроном не звучит.
    */
   Metronome.prototype.unlock = function () {
-    var AC = global.AudioContext || global.webkitAudioContext;
-    if (!AC) return false;
-    if (!this.ctx) this.ctx = new AC();
+    if (!this._open()) return false;
     this.ctx.resume();
     return true;
   };
 
-  /** Старт из жеста пользователя или после unlock(): иначе iOS звук не даст. */
+  /**
+   * Старт из жеста пользователя или после unlock(): иначе iOS звук не даст.
+   * resume() у контекста в состоянии 'interrupted' (звонок, Siri, звук другого
+   * приложения) может не разрешиться никогда — тогда старт молча висел, а серия
+   * шла без щелчков. Теперь через 2 с это ошибка с состоянием контекста.
+   */
   Metronome.prototype.start = function () {
-    var AC = global.AudioContext || global.webkitAudioContext;
-    if (!AC) return Promise.reject(new Error('нет Web Audio'));
-    if (!this.ctx) this.ctx = new AC();
+    if (!this._open()) return Promise.reject(new Error('нет Web Audio'));
     var self = this;
-    return this.ctx.resume().then(function () {
+    var resumed = Promise.race([
+      this.ctx.resume(),
+      new Promise(function (resolve) { global.setTimeout(resolve, 2000); })
+    ]).then(function () {
+      if (self.ctx.state !== 'running') {
+        throw new Error('AudioContext.state = ' + self.ctx.state + ' — звука нет');
+      }
+    });
+    return resumed.then(function () {
       return self._waitForClock();
     }).then(function (ready) {
       if (!ready) {
@@ -365,6 +415,12 @@
     // Соответствие шкал замеряется ещё раз в конце: дрейф аудио-часов
     // относительно performance.now() виден только по двум точкам.
     this.mappingEnd = this.measureMapping();
+    // Контекст закрывается: иначе каждая серия оставляла бы живой контекст,
+    // а их число на страницу в WebKit ограничено.
+    if (this.ctx && this.ctx.state !== 'closed' && this.ctx.close) {
+      this.sampleRate = this.ctx.sampleRate;
+      this.ctx.close();
+    }
     return this;
   };
 
@@ -389,7 +445,9 @@
       mappingStart: this.mapping,
       mappingEnd: this.mappingEnd,
       clockNeverStarted: !!this.clockNeverStarted,
-      sampleRate: this.ctx ? this.ctx.sampleRate : null,
+      sampleRate: this.sampleRate || (this.ctx ? this.ctx.sampleRate : null),
+      audioSessionType: this.audioSessionType === undefined ? null : this.audioSessionType,
+      stateLog: this.stateLog || null,
       beats: this.beats
     };
   };

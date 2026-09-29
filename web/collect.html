@@ -382,7 +382,8 @@
 
     if (metro) {
       metro.start().then(function (m) {
-        Log.ok('метроном ' + bpm + ' BPM, перевод шкал: ' + m.method);
+        Log.ok('метроном ' + bpm + ' BPM, перевод шкал: ' + m.method
+               + ', audioSession: ' + metro.audioSessionType);
         if (m.method !== 'getOutputTimestamp') Log.warn('getOutputTimestamp недоступен — точность перевода хуже');
       }).catch(function (e) { Log.err('метроном не стартовал: ' + e.message); });
     }
