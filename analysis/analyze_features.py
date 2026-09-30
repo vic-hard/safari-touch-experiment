@@ -17,6 +17,8 @@
                 касания) — от хвата и от человека зависит меньше сырого
     windupbg    замах: максимум |a| за 100 мс ДО касания к тому же фону —
                 ответ, известный в самый момент касания
+    gyroNN      максимум модуля скорости поворота корпуса за первые NN мс,
+                °/с, без нормировки — кандидат этапа 5 вместо accelbgNN
 
 Ускорение считается в `analyze_motion.py` (там же разобрано, почему фон такой);
 у серий, снятых без канала ускорения, эти признаки пустые, и наборы с ними
@@ -70,11 +72,13 @@ FEATURE_SETS = [
     ("замах к фону (в момент касания)", ["windupbg"]),
     ("площадь в окне ИЛИ ускорение к фону", ["areaW", "accelbgW"]),
     ("площадь, микросдвиг, ускорение к фону", ["areaW", "shiftW", "accelbgW"]),
+    ("гироскоп в окне", ["gyroW"]),
+    ("гироскоп ИЛИ ускорение к фону", ["gyroW", "accelbgW"]),
 ]
 
 # Признаки канала ускорения: наборы с ними считаются, только если канал есть у
 # всех серий расчёта, иначе серия без канала потеряла бы все мягкие тапы.
-MOTION_KEYS = ("accelW", "accelbgW", "windupbg")
+MOTION_KEYS = ("accelW", "accelbgW", "windupbg", "gyroW")
 
 
 def head(title):
@@ -180,6 +184,7 @@ def contact_rows(session, source, window_ms):
             "accelW": m.get("accel"),
             "accelbgW": m.get("accelbg"),
             "windupbg": m.get("windupbg"),
+            "gyroW": m.get("gyro"),
             "bg": m.get("bg"),
             "hasMotion": motion is not None,
         })
@@ -243,7 +248,7 @@ def evaluate(train, test, keys, soft_quantile=1.0):
 
 
 # Признаки с окном: имя в пороге — основа плюс окно в мс (area50, accelbg50).
-WINDOWED = ("area", "shift", "accel", "accelbg")
+WINDOWED = ("area", "shift", "accel", "accelbg", "gyro")
 
 
 def key_name(key, window_ms):
@@ -268,7 +273,7 @@ def parse_thresholds(text, window_ms):
     """«area50=2336.369,shift50=0» → {'areaW': 2336.369, 'shiftW': 0.0}.
 
     Имена те же, что в docs/protocol.md: area, shift — по всему контакту,
-    areaNN, shiftNN, accelNN, accelbgNN — по окну NN мс, windupbg — замах, у
+    areaNN, shiftNN, accelNN, accelbgNN, gyroNN — по окну NN мс, windupbg — замах, у
     него окно своё. Окно в имени обязано совпасть с --window, иначе правило
     считалось бы не то, которое зафиксировано.
     """
@@ -296,7 +301,7 @@ def parse_thresholds(text, window_ms):
                 break
         else:
             raise SystemExit("непонятное имя порога %r (ожидалось area, shift, windupbg,"
-                             " area<мс>, shift<мс>, accel<мс>, accelbg<мс>)" % name)
+                             " area<мс>, shift<мс>, accel<мс>, accelbg<мс>, gyro<мс>)" % name)
     if not out:
         raise SystemExit("--thresholds пуст")
     return out
@@ -411,7 +416,8 @@ def separability_report(rows_by_name, window_ms):
     if all(r["hasMotion"] for r in rows):
         features += [("accelW", "ускорение за %d мс" % window_ms),
                      ("accelbgW", "ускорение к фону за %d мс" % window_ms),
-                     ("windupbg", "замах к фону, -100…0 мс")]
+                     ("windupbg", "замах к фону, -100…0 мс"),
+                     ("gyroW", "гироскоп за %d мс" % window_ms)]
         no_bg = sum(1 for r in rows if r["accelW"] is not None and r["bg"] is None)
         if no_bg:
             print("  [!] у %d контактов из %d нет фона: меньше %d отсчётов за %d с до касания."

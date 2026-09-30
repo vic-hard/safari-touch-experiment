@@ -575,11 +575,14 @@ BG_QUANTILE = 0.25
 BG_MIN_SAMPLES = 20
 
 
-def window_max(index, baseline, t0, lo, hi):
-    """Максимум |a| в (t0 + lo, t0 + hi] и число отсчётов в окне."""
+def window_max(index, baseline, t0, lo, hi, magnitude=None):
+    """Максимум |a| в (t0 + lo, t0 + hi] и число отсчётов в окне.
+
+    `magnitude` — другая величина отсчёта вместо |a| (гироскоп).
+    """
     best, n = None, 0
     for s in in_window(index, t0, lo, hi):
-        v = accel_magnitude(s, baseline)
+        v = magnitude(s) if magnitude else accel_magnitude(s, baseline)
         if v is None:
             continue
         n += 1
@@ -605,6 +608,11 @@ def tap_features(session, contacts, window_ms):
         windupbg   максимум |a| в −100…0 мс, делённый на фон: ответ, известный
                    в самый момент касания, без ожидания окна
         bg         сам фон, м/с²
+        gyro       максимум модуля скорости поворота в первые window_ms после
+                   DOWN, °/с — без фона: на этапе 3 фон ускорения на 150 BPM
+                   оказался в 2–3 раза выше, чем на 30 BPM, а гироскоп и без
+                   нормировки держал порог на обоих темпах
+                   (docs/plan-accelerometer.md, этапы 3 и 5)
 
     Метка отсчёта `devicemotion` — время доставки, физический отсчёт раньше на
     величину до периода потока (M2). Поправка не вносится: игра видит отсчёт в
@@ -622,6 +630,7 @@ def tap_features(session, contacts, window_ms):
     for c in contacts:
         t0 = event_time(c["events"][0], scale)
         accel, n = window_max(index, baseline, t0, 0, window_ms)
+        gyro, _ = window_max(index, baseline, t0, 0, window_ms, gyro_magnitude)
         windup, _ = window_max(index, baseline, t0, WINDUP_FROM_MS, WINDUP_TO_MS)
         bg = background(index, baseline, t0) if isinstance(t0, (int, float)) else None
         out.append({
@@ -630,6 +639,7 @@ def tap_features(session, contacts, window_ms):
             "bg": bg,
             "accelbg": accel / bg if accel is not None and bg else None,
             "windupbg": windup / bg if windup is not None and bg else None,
+            "gyro": gyro,
         })
     return out
 
